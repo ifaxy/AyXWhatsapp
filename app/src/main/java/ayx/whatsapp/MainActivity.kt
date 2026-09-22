@@ -26,6 +26,7 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
+import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
@@ -334,6 +335,8 @@ fun GatewayApp() {
     var searchMode by remember { mutableStateOf(false) }
     var searchQuery by remember { mutableStateOf("") }
     var chatPresence by remember { mutableStateOf<GatewayClient.Presence?>(null) }
+    val blkPrefs = remember { ctx.getSharedPreferences("wagw", Context.MODE_PRIVATE) }
+    var blockedJids by remember { mutableStateOf(blkPrefs.getStringSet("blocked", emptySet())!!.toSet()) }
     LaunchedEffect(openChat) { loadChatWp(openChat); openChat?.let { NotificationHelper.cancel(ctx, it) } }
     LaunchedEffect(openChat) {
         chatPresence = null
@@ -496,18 +499,20 @@ fun GatewayApp() {
                     }
                     if (openChat != null) {
                         var menu by remember { mutableStateOf(false) }
+                        val ocb = openChat
+                        val isBlocked = ocb != null && ocb in blockedJids
                         IconButton(onClick = { menu = true }) { Icon(Icons.Filled.MoreVert, "menu") }
                         DropdownMenu(expanded = menu, onDismissRequest = { menu = false }) {
                             DropdownMenuItem(text = { Text("Change wallpaper") }, onClick = { menu = false; chatWallpaperPicker.launch("image/*") })
-                            DropdownMenuItem(text = { Text("Block contact") }, onClick = {
+                            if (!isBlocked) DropdownMenuItem(text = { Text("Block contact") }, onClick = {
                                 menu = false
                                 val c = openChat
-                                if (c != null) scope.launch { runCatching { GatewayClient.blockChat(c, true) }.onSuccess { notify("blocked") }.onFailure { notify("failed: ${it.message}") } }
+                                if (c != null) scope.launch { runCatching { GatewayClient.blockChat(c, true) }.onSuccess { notify("blocked"); blockedJids = blockedJids + c; blkPrefs.edit().putStringSet("blocked", blockedJids).apply() }.onFailure { notify("failed: ${it.message}") } }
                             })
-                            DropdownMenuItem(text = { Text("Unblock contact") }, onClick = {
+                            if (isBlocked) DropdownMenuItem(text = { Text("Unblock contact") }, onClick = {
                                 menu = false
                                 val c = openChat
-                                if (c != null) scope.launch { runCatching { GatewayClient.blockChat(c, false) }.onSuccess { notify("unblocked") }.onFailure { notify("failed: ${it.message}") } }
+                                if (c != null) scope.launch { runCatching { GatewayClient.blockChat(c, false) }.onSuccess { notify("unblocked"); blockedJids = blockedJids - c; blkPrefs.edit().putStringSet("blocked", blockedJids).apply() }.onFailure { notify("failed: ${it.message}") } }
                             })
                         }
                     }
@@ -728,7 +733,7 @@ private fun MessageBubble(m: GatewayClient.Msg, previewCache: MutableMap<String,
 
     Row(Modifier.fillMaxWidth().padding(vertical = 1.dp), horizontalArrangement = if (m.fromMe) Arrangement.End else Arrangement.Start) {
         Surface(color = bubbleColor, shape = shape,
-            modifier = Modifier.widthIn(max = 290.dp).combinedClickable(onClick = {}, onLongClick = { onLongClick(m) })) {
+            modifier = Modifier.widthIn(max = 290.dp).combinedClickable(interactionSource = remember { MutableInteractionSource() }, indication = null, onClick = {}, onLongClick = { onLongClick(m) })) {
             Column(Modifier.padding(4.dp), verticalArrangement = Arrangement.spacedBy(2.dp)) {
                 if (!m.fromMe && m.chat.endsWith("@g.us") && !m.name.isNullOrBlank()) {
                     Text(m.name, style = MaterialTheme.typography.labelMedium, color = IOS_BLUE,

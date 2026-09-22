@@ -254,6 +254,10 @@ object GatewayClient {
     private fun readJson(c: HttpURLConnection): JSONObject {
         val stream = if (c.responseCode in 200..299) c.inputStream else c.errorStream
         val text = stream?.bufferedReader()?.use { it.readText() } ?: "{}"
-        return JSONObject(if (text.isBlank()) "{}" else text)
+        return try {
+            JSONObject(if (text.isBlank()) "{}" else text)
+        } catch (e: Exception) {
+            JSONObject().put("ok", false).put("error", text.take(180))
+        }
     }
 }
