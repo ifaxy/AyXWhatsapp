@@ -15,7 +15,6 @@ android {
         versionName = "1.3"
 
         ndk {
-            // Ship arm64 only for the spike (covers essentially all modern phones).
             abiFilters += "arm64-v8a"
         }
         externalNativeBuild {
@@ -33,6 +32,9 @@ android {
                 storePassword = System.getenv("KEYSTORE_PASSWORD")
                 keyAlias = System.getenv("KEY_ALIAS")
                 keyPassword = System.getenv("KEY_PASSWORD")
+                enableV1Signing = false
+                enableV2Signing = true
+                enableV3Signing = true
             }
         }
     }
@@ -71,8 +73,11 @@ android {
         kotlinCompilerExtensionVersion = "1.5.14"
     }
 
+    androidResources {
+        noCompress += "zip"
+    }
+
     packaging {
-        // Extract libnode.so to the filesystem (safer for the embedded runtime).
         jniLibs {
             useLegacyPackaging = true
         }
