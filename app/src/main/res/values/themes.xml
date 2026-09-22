@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Base theme; Compose drives the actual colors. Flat name + explicit parent
+         (dot-notation style names trip AndroidIDE's AAPT2 parent inference). -->
+    <style name="Theme.WAGateway" parent="android:Theme.Material.Light.NoActionBar" />
+</resources>
