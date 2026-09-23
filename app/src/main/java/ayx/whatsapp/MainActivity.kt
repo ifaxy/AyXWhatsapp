@@ -30,6 +30,7 @@ import androidx.compose.foundation.combinedClickable
 import androidx.activity.result.PickVisualMediaRequest
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.mutableStateMapOf
+import androidx.compose.runtime.key
 import androidx.compose.foundation.gestures.detectHorizontalDragGestures
 import androidx.compose.foundation.pager.HorizontalPager
 import androidx.compose.foundation.pager.rememberPagerState
@@ -486,6 +487,7 @@ fun GatewayApp() {
     val blkPrefs = remember { ctx.getSharedPreferences("wagw", Context.MODE_PRIVATE) }
     LaunchedEffect(Unit) {
         ChatFlags.prefs = blkPrefs
+        ChatFlags.reveal = false
         blkPrefs.getStringSet("hidden", emptySet())!!.forEach { ChatFlags.hidden[it] = true }
         blkPrefs.getStringSet("locked", emptySet())!!.forEach { ChatFlags.locked[it] = true }
     }
@@ -703,7 +705,17 @@ fun GatewayApp() {
                                 if (sub.isNotEmpty()) Text(sub, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                             }
                         }
-                    } else Text(title, fontWeight = FontWeight.Bold)
+                    } else Text(title, fontWeight = FontWeight.Bold, modifier = Modifier.combinedClickable(
+                        interactionSource = remember { MutableInteractionSource() }, indication = null,
+                        onClick = {},
+                        onLongClick = {
+                            if (ChatFlags.reveal) ChatFlags.reveal = false
+                            else {
+                                val km = ctx.getSystemService(KeyguardManager::class.java)
+                                if (km != null && km.isKeyguardSecure) revealUnlock.launch(km.createConfirmDeviceCredentialIntent("Show hidden chats", "Verify to reveal"))
+                                else ChatFlags.reveal = true
+                            }
+                        }))
                 },
                 navigationIcon = {
                     if (openChat != null || screen == "settings" || screen == "newchat" || screen == "profile")
@@ -720,19 +732,6 @@ fun GatewayApp() {
                         } else {
                             IconButton(onClick = { searchMode = true }) { Icon(Icons.Filled.Search, "search") }
                             IconButton(onClick = { screen = "settings" }) { Icon(Icons.Filled.Settings, "settings") }
-                            var homeMenu by remember { mutableStateOf(false) }
-                            IconButton(onClick = { homeMenu = true }) { Icon(Icons.Filled.MoreVert, "more") }
-                            DropdownMenu(expanded = homeMenu, onDismissRequest = { homeMenu = false }) {
-                                DropdownMenuItem(text = { Text(if (ChatFlags.reveal) "Hide hidden chats" else "Show hidden chats") }, onClick = {
-                                    homeMenu = false
-                                    if (ChatFlags.reveal) ChatFlags.reveal = false
-                                    else {
-                                        val km = ctx.getSystemService(KeyguardManager::class.java)
-                                        if (km != null && km.isKeyguardSecure) revealUnlock.launch(km.createConfirmDeviceCredentialIntent("Show hidden chats", "Verify to reveal"))
-                                        else ChatFlags.reveal = true
-                                    }
-                                })
-                            }
                         }
                     }
                     if (openChat != null) {
@@ -1476,7 +1475,9 @@ private fun StatusViewer(statuses: List<GatewayClient.StatusItem>, startSender: 
         Surface(Modifier.fillMaxSize(), color = Color.Black) {
             Box(Modifier.fillMaxSize()) {
                 if (st.mediaType == "video" && st.mediaName != null) {
-                    AndroidView(factory = { c -> VideoView(c).apply { setVideoURI(Uri.parse(GatewayClient.mediaUrl(st.mediaName!!))); setOnPreparedListener { it.start() }; setOnCompletionListener { goNext() } } }, modifier = Modifier.fillMaxSize())
+                    key(si, ii, st.mediaName) {
+                        AndroidView(factory = { c -> VideoView(c).apply { setVideoURI(Uri.parse(GatewayClient.mediaUrl(st.mediaName!!))); setOnPreparedListener { it.start() }; setOnCompletionListener { goNext() } } }, modifier = Modifier.fillMaxSize())
+                    }
                 } else if (bmp != null) {
                     Image(bmp!!, null, Modifier.fillMaxSize(), contentScale = ContentScale.Fit)
                 } else {

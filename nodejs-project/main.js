@@ -564,9 +564,15 @@ app.post('/session/import', async (req, res) => {
 
 app.get('/contacts', (req, res) => {
   const items = []
+  const seen = new Set()
   for (const [jid, c] of contacts) {
     if (!jid.endsWith('@s.whatsapp.net')) continue
     items.push({ jid, name: c.name || c.notify || nameStore[jid] || '', number: jid.split('@')[0] })
+    seen.add(jid)
+  }
+  for (const jid of Object.keys(nameStore)) {
+    if (seen.has(jid) || !nameStore[jid]) continue
+    items.push({ jid, name: nameStore[jid], number: jid.split('@')[0].split(':')[0] })
   }
   items.sort((a, b) => (a.name || a.number).localeCompare(b.name || b.number))
   res.json({ items })
