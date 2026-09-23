@@ -8,6 +8,14 @@ import android.content.Context
 import android.content.Intent
 import android.os.Build
 import android.os.IBinder
+import android.graphics.BitmapFactory
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
+import kotlinx.coroutines.isActive
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.delay
 
 /** Foreground service that keeps the node process (and the WhatsApp socket) alive. */
 private fun notifIcon(c: android.content.Context): Int {
@@ -16,12 +24,42 @@ private fun notifIcon(c: android.content.Context): Int {
 }
 
 class NodeService : Service() {
+    private val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
     override fun onBind(intent: Intent?): IBinder? = null
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         startForeground(NOTIF_ID, buildNotification())
         NodeRuntime.ensureStarted(applicationContext)
+        startNotifPolling()
         return START_STICKY
+    }
+
+    override fun onDestroy() { scope.cancel(); super.onDestroy() }
+
+    private fun startNotifPolling() {
+        scope.launch {
+            val prefs = getSharedPreferences("wagw", Context.MODE_PRIVATE)
+            var lastTs = prefs.getLong("notif_ts", System.currentTimeMillis())
+            while (isActive) {
+                try {
+                    val msgs = GatewayClient.getMessages()
+                    val maxTs = msgs.maxOfOrNull { it.ts } ?: lastTs
+                    if (maxTs > lastTs) {
+                        msgs.filter { !it.fromMe && !it.deleted && it.ts > lastTs && it.chat != currentOpenChat }
+                            .groupBy { it.chat }.forEach { (chat, group) ->
+                                val m = group.maxByOrNull { it.ts }!!
+                                val dp = try { GatewayClient.dpBytes(chat)?.let { BitmapFactory.decodeByteArray(it, 0, it.size) } } catch (_: Exception) { null }
+                                val body = if (m.text.isNotBlank()) m.text else if (m.mediaType != null) "[" + m.mediaType + "]" else ""
+                                val name = group.firstOrNull { !it.name.isNullOrBlank() }?.name ?: chat.substringBefore("@")
+                                NotificationHelper.notifyMessage(applicationContext, chat, name, body, dp)
+                            }
+                        lastTs = maxTs
+                        prefs.edit().putLong("notif_ts", lastTs).apply()
+                    }
+                } catch (_: Exception) {}
+                delay(4000)
+            }
+        }
     }
 
     private fun buildNotification(): Notification {
@@ -40,6 +78,7 @@ class NodeService : Service() {
     }
 
     companion object {
+        @Volatile var currentOpenChat: String? = null
         private const val CHANNEL = "wagw_engine"
         private const val NOTIF_ID = 1
 

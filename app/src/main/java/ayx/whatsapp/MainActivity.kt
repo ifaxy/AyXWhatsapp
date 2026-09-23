@@ -74,6 +74,9 @@ import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.text.font.FontStyle
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.foundation.basicMarquee
+import androidx.compose.ui.graphics.Shape
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.style.TextOverflow
@@ -327,6 +330,7 @@ fun GatewayApp() {
     }
 
     // file picker for sending media
+    var pendingMedia by remember { mutableStateOf<Pair<Uri, String>?>(null) }
     val picker = rememberLauncherForActivityResult(ActivityResultContracts.GetContent()) { uri: Uri? ->
         if (uri != null && openChat != null) {
             val mime = ctx.contentResolver.getType(uri) ?: "application/octet-stream"
@@ -345,7 +349,6 @@ fun GatewayApp() {
     }
     LaunchedEffect(Unit) { loadWallpaper() }
     var cameraUri by remember { mutableStateOf<Uri?>(null) }
-    var pendingMedia by remember { mutableStateOf<Pair<Uri, String>?>(null) }
     val cameraLauncher = rememberLauncherForActivityResult(ActivityResultContracts.TakePicture()) { ok ->
         val jid = openChat; val u = cameraUri
         if (ok && u != null && jid != null) scope.launch {
@@ -432,7 +435,7 @@ fun GatewayApp() {
     var chatPresence by remember { mutableStateOf<GatewayClient.Presence?>(null) }
     val blkPrefs = remember { ctx.getSharedPreferences("wagw", Context.MODE_PRIVATE) }
     var blockedJids by remember { mutableStateOf(blkPrefs.getStringSet("blocked", emptySet())!!.toSet()) }
-    LaunchedEffect(openChat) { loadChatWp(openChat); openChat?.let { NotificationHelper.cancel(ctx, it) } }
+    LaunchedEffect(openChat) { loadChatWp(openChat); NodeService.currentOpenChat = openChat; openChat?.let { NotificationHelper.cancel(ctx, it) } }
     LaunchedEffect(openChat) {
         chatPresence = null
         val c = openChat
@@ -460,17 +463,6 @@ fun GatewayApp() {
                 if (!settingsLoaded) { settings = GatewayClient.getSettings(); settingsLoaded = true }
                 messages = GatewayClient.getMessages()
                 optimistic.removeAll { opt -> messages.any { it.fromMe && it.chat == opt.chat && it.text == opt.text && it.ts >= opt.ts - 8000 } }
-                val maxTs = messages.maxOfOrNull { it.ts } ?: lastNotifTs
-                if (maxTs > lastNotifTs) {
-                    messages.filter { !it.fromMe && !it.deleted && it.ts > lastNotifTs && it.chat != openChat }
-                        .groupBy { it.chat }.forEach { (chat, msgs) ->
-                            val m = msgs.maxByOrNull { it.ts }!!
-                            val dpBmp = GatewayClient.dpBytes(chat)?.let { BitmapFactory.decodeByteArray(it, 0, it.size) }
-                            val body = if (m.text.isNotBlank()) m.text else if (m.mediaType != null) "[${m.mediaType}]" else ""
-                            NotificationHelper.notifyMessage(ctx, chat, chatTitle(msgs), body, dpBmp)
-                        }
-                    lastNotifTs = maxTs
-                }
             }
             delay(3000)
         }
@@ -608,14 +600,12 @@ fun GatewayApp() {
                         OutlinedTextField(searchQuery, { searchQuery = it }, placeholder = { Text("Search chats") }, singleLine = true, modifier = Modifier.fillMaxWidth())
                     } else if (openChat != null) {
                         Row(verticalAlignment = Alignment.CenterVertically) {
-                            Avatar(openChat!!, chatName ?: "?", dpCache, 34.dp)
-                            Spacer(Modifier.width(10.dp))
+                            Avatar(openChat!!, chatName ?: "?", dpCache, 42.dp, RoundedCornerShape(13.dp))
+                            Spacer(Modifier.width(12.dp))
                             Column {
-                                Text(title, maxLines = 1, overflow = TextOverflow.Ellipsis, style = MaterialTheme.typography.titleMedium)
-                                chatPresence?.let { pr ->
-                                    val sub = if (pr.online) "online" else if (pr.lastSeen > 0) "last seen " + fmt(pr.lastSeen * 1000) else ""
-                                    if (sub.isNotEmpty()) Text(sub, style = MaterialTheme.typography.labelSmall)
-                                }
+                                Text(title, maxLines = 1, fontWeight = FontWeight.Bold, style = MaterialTheme.typography.titleMedium, modifier = Modifier.widthIn(max = 200.dp).basicMarquee())
+                                val sub = chatPresence?.let { pr -> if (pr.online) "online" else if (pr.lastSeen > 0) "last seen " + fmt(pr.lastSeen * 1000) else "" } ?: ""
+                                Text(if (sub.isNotEmpty()) sub else "tap for info", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                             }
                         }
                     } else Text(title)
@@ -718,7 +708,7 @@ fun GatewayApp() {
 }
 
 @Composable
-private fun Avatar(jid: String, name: String, cache: MutableMap<String, ImageBitmap?>, size: androidx.compose.ui.unit.Dp) {
+private fun Avatar(jid: String, name: String, cache: MutableMap<String, ImageBitmap?>, size: androidx.compose.ui.unit.Dp, shape: Shape = CircleShape) {
     LaunchedEffect(jid) {
         if (!cache.containsKey(jid)) {
             val b = GatewayClient.dpBytes(jid)
@@ -726,8 +716,8 @@ private fun Avatar(jid: String, name: String, cache: MutableMap<String, ImageBit
         }
     }
     val dp = cache[jid]
-    Box(Modifier.size(size).background(MaterialTheme.colorScheme.primaryContainer, CircleShape), contentAlignment = Alignment.Center) {
-        if (dp != null) Image(dp, "dp", Modifier.size(size).clip(CircleShape), contentScale = ContentScale.Crop)
+    Box(Modifier.size(size).background(MaterialTheme.colorScheme.primaryContainer, shape), contentAlignment = Alignment.Center) {
+        if (dp != null) Image(dp, "dp", Modifier.size(size).clip(shape), contentScale = ContentScale.Crop)
         else Text(name.take(1).uppercase(), style = MaterialTheme.typography.titleMedium)
     }
 }
