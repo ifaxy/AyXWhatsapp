@@ -1486,6 +1486,7 @@ private fun StatusViewer(statuses: List<GatewayClient.StatusItem>, startSender: 
     fun goNext() { if (ii < items.size - 1) ii++ else if (si < groups.size - 1) { si++; ii = 0 } else onClose() }
     fun goPrev() { if (ii > 0) ii-- else if (si > 0) { si--; ii = 0 } }
     var replyText by remember { mutableStateOf("") }
+    var progress by remember(si, ii) { mutableStateOf(0f) }
 
     var bmp by remember(st.mediaName, si, ii) { mutableStateOf<ImageBitmap?>(null) }
     LaunchedEffect(st.mediaName, si, ii) {
@@ -1496,7 +1497,17 @@ private fun StatusViewer(statuses: List<GatewayClient.StatusItem>, startSender: 
             bmp = bytes?.let { BitmapFactory.decodeByteArray(it, 0, it.size)?.asImageBitmap() } ?: decodeThumb(st.thumb)
         }
     }
-    LaunchedEffect(si, ii, replyText.isBlank()) { if (st.mediaType != "video" && replyText.isBlank()) { delay(5000); goNext() } }
+    LaunchedEffect(si, ii, replyText.isBlank()) {
+        if (replyText.isNotBlank()) return@LaunchedEffect
+        if (st.mediaType == "video") return@LaunchedEffect
+        progress = 0f
+        val dur = 5000L; val step = 40L; var elapsed = 0L
+        while (elapsed < dur) {
+            delay(step); elapsed += step; progress = (elapsed.toFloat() / dur).coerceIn(0f, 1f)
+            if (replyText.isNotBlank()) return@LaunchedEffect
+        }
+        goNext()
+    }
 
     Dialog(onDismissRequest = onClose, properties = DialogProperties(usePlatformDefaultWidth = false)) {
         Surface(Modifier.fillMaxSize(), color = Color.Black) {
@@ -1520,7 +1531,7 @@ private fun StatusViewer(statuses: List<GatewayClient.StatusItem>, startSender: 
                 Column(Modifier.fillMaxWidth().statusBarsPadding().padding(8.dp)) {
                     Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(3.dp)) {
                         items.indices.forEach { idx ->
-                            LinearProgressIndicator(progress = { if (idx < ii) 1f else if (idx == ii) 0.6f else 0f }, modifier = Modifier.weight(1f).height(3.dp), color = Color.White, trackColor = Color.White.copy(alpha = 0.3f))
+                            LinearProgressIndicator(progress = { if (idx < ii) 1f else if (idx == ii) progress else 0f }, modifier = Modifier.weight(1f).height(3.dp), color = Color.White, trackColor = Color.White.copy(alpha = 0.35f))
                         }
                     }
                     Spacer(Modifier.height(8.dp))

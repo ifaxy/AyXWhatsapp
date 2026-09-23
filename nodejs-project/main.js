@@ -712,24 +712,46 @@ app.get('/music/search', async (req, res) => {
   try {
     const q = String(req.query.q || '').trim()
     if (!q) return res.json({ items: [] })
-    const url = 'https://www.jiosaavn.com/api.php?p=1&q=' + encodeURIComponent(q) + '&_format=json&_marker=0&api_version=4&ctx=web6dot0&n=25&__call=search.getResults'
-    const r = await fetch(url, { headers: { 'User-Agent': 'Mozilla/5.0', 'Accept': 'application/json' } })
-    const data = await r.json()
-    const results = data && data.results ? data.results : []
-    const items = []
-    for (const it of results) {
-      const mi = it.more_info || {}
-      const enc = mi.encrypted_media_url || it.encrypted_media_url
-      if (!enc) continue
-      const audio = saavnDecrypt(enc)
-      if (!audio) continue
-      let artist = ''
-      try { artist = (mi.artistMap && mi.artistMap.primary_artists ? mi.artistMap.primary_artists.map(a => a.name).join(', ') : '') || it.primary_artists || it.subtitle || '' } catch (_) {}
-      const image = String(it.image || '').replace('150x150', '500x500')
-      items.push({ title: deEnt(it.title || it.song || ''), artist: deEnt(artist), image, url: audio })
+    let items = []
+    // 1) saavn.dev wrapper (direct playable URLs, most reliable)
+    try {
+      const r = await fetch('https://saavn.dev/api/search/songs?query=' + encodeURIComponent(q) + '&limit=25', { headers: { 'User-Agent': 'Mozilla/5.0' } })
+      const data = await r.json()
+      const results = (data && data.data && data.data.results) ? data.data.results : []
+      for (const sng of results) {
+        const dl = sng.downloadUrl || []
+        const best = dl.find(x => x.quality === '320kbps') || dl[dl.length - 1]
+        const url = best && best.url
+        if (!url) continue
+        let artist = ''
+        try { artist = (sng.artists && sng.artists.primary ? sng.artists.primary.map(a => a.name).join(', ') : '') || '' } catch (_) {}
+        const imgs = sng.image || []
+        const image = imgs.length ? (imgs[imgs.length - 1].url || '') : ''
+        items.push({ title: deEnt(sng.name || ''), artist: deEnt(artist), image, url })
+      }
+    } catch (e) { log('saavn.dev err ' + (e && e.message)) }
+    // 2) fallback: raw JioSaavn api.php + DES decrypt
+    if (items.length === 0) {
+      try {
+        const u = 'https://www.jiosaavn.com/api.php?p=1&q=' + encodeURIComponent(q) + '&_format=json&_marker=0&api_version=4&ctx=web6dot0&n=25&__call=search.getResults'
+        const r = await fetch(u, { headers: { 'User-Agent': 'Mozilla/5.0', 'Accept': 'application/json' } })
+        const data = await r.json()
+        const results = data && data.results ? data.results : []
+        for (const it of results) {
+          const mi = it.more_info || {}
+          const enc = mi.encrypted_media_url || it.encrypted_media_url
+          if (!enc) continue
+          const audio = saavnDecrypt(enc)
+          if (!audio) continue
+          let artist = ''
+          try { artist = (mi.artistMap && mi.artistMap.primary_artists ? mi.artistMap.primary_artists.map(a => a.name).join(', ') : '') || it.primary_artists || it.subtitle || '' } catch (_) {}
+          const image = String(it.image || '').replace('150x150', '500x500')
+          items.push({ title: deEnt(it.title || it.song || ''), artist: deEnt(artist), image, url: audio })
+        }
+      } catch (e) { log('jiosaavn err ' + (e && e.message)) }
     }
     res.json({ items: items.slice(0, 25) })
-  } catch (e) { log('saavn err', e && e.message); res.json({ items: [] }) }
+  } catch (e) { log('music err ' + (e && e.message)); res.json({ items: [] }) }
 })
 
 app.post('/status/post', async (req, res) => {
