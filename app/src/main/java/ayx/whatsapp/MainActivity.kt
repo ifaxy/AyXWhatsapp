@@ -1583,8 +1583,10 @@ private fun MusicSearchSheet(onPick: (GatewayClient.Song) -> Unit, onClose: () -
     var q by remember { mutableStateOf("") }
     var results by remember { mutableStateOf<List<GatewayClient.Song>>(emptyList()) }
     var loading by remember { mutableStateOf(false) }
+    var error by remember { mutableStateOf("") }
     LaunchedEffect(q) {
-        if (q.trim().length >= 2) { loading = true; delay(450); results = GatewayClient.searchMusic(q.trim()); loading = false } else results = emptyList()
+        if (q.trim().length >= 2) { loading = true; delay(450); val r = GatewayClient.searchMusic(q.trim()); results = r.first; error = r.second; loading = false }
+        else { results = emptyList(); error = "" }
     }
     Dialog(onDismissRequest = onClose) {
         Surface(shape = RoundedCornerShape(16.dp)) {
@@ -1593,6 +1595,9 @@ private fun MusicSearchSheet(onPick: (GatewayClient.Song) -> Unit, onClose: () -
                 Spacer(Modifier.height(8.dp))
                 OutlinedTextField(q, { q = it }, placeholder = { Text("Search songs…") }, leadingIcon = { Icon(Icons.Filled.Search, null) }, singleLine = true, modifier = Modifier.fillMaxWidth())
                 if (loading) LinearProgressIndicator(Modifier.fillMaxWidth().padding(top = 6.dp))
+                if (!loading && results.isEmpty() && q.trim().length >= 2) {
+                    Text(if (error.isNotBlank()) "No songs (" + error.take(120) + ")" else "No results", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error, modifier = Modifier.padding(vertical = 8.dp))
+                }
                 Spacer(Modifier.height(6.dp))
                 LazyColumn(Modifier.fillMaxWidth()) {
                     itemsIndexed(results) { _, sg ->
