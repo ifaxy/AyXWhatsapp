@@ -114,7 +114,31 @@ function extractText(m) {
     || m.imageMessage?.caption
     || m.videoMessage?.caption
     || m.documentMessage?.caption
+    || m.buttonsMessage?.contentText
+    || m.buttonsMessage?.headerText
+    || m.templateMessage?.hydratedTemplate?.hydratedContentText
+    || m.templateMessage?.hydratedFourRowTemplate?.hydratedContentText
+    || m.templateMessage?.fourRowTemplate?.content?.text
+    || m.interactiveMessage?.body?.text
+    || m.interactiveMessage?.header?.title
+    || m.interactiveResponseMessage?.body?.text
+    || m.listMessage?.description
+    || m.listMessage?.title
+    || m.productMessage?.product?.title
+    || m.productMessage?.body?.text
+    || m.buttonsResponseMessage?.selectedDisplayText
+    || m.templateButtonReplyMessage?.selectedDisplayText
+    || m.listResponseMessage?.title
+    || m.contactMessage?.displayName
+    || m.locationMessage?.name
+    || m.pollCreationMessage?.name
+    || m.eventMessage?.name
     || ''
+}
+
+function resolveName(msg, jid) {
+  const c = contacts.get(jid)
+  return msg.pushName || msg.verifiedBizName || (c && c.name) || ''
 }
 
 function matchReply(text) {
@@ -314,7 +338,7 @@ async function handleMessages({ messages, type }) {
         continue
       }
       const ts = msg.messageTimestamp ? Number(msg.messageTimestamp) * 1000 : Date.now()
-      const entry = { chat: from, name: msg.pushName || '', sender, fromMe, text: extractText(msg.message), ts, id }
+      const entry = { chat: from, name: resolveName(msg, from), sender, fromMe, text: extractText(msg.message), ts, id }
       entry.quoted = quotedOf(msg.message)
       await enrichMedia(msg, entry)
       const text = entry.text
@@ -384,7 +408,7 @@ async function handleHistory({ messages, contacts: cts }) {
       }
       const fromMe = !!msg.key.fromMe
       const ts = msg.messageTimestamp ? Number(msg.messageTimestamp) * 1000 : Date.now()
-      const entry = { chat: from, name: msg.pushName || '', fromMe, text: extractText(msg.message), ts, id: msg.key.id }
+      const entry = { chat: from, name: resolveName(msg, from), fromMe, text: extractText(msg.message), ts, id: msg.key.id }
       if (msg.key.id) msgStore.set(msg.key.id, entry)
       msgLog.push(entry)
       n++

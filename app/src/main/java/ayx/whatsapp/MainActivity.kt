@@ -37,6 +37,7 @@ import android.provider.ContactsContract
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.layout.consumeWindowInsets
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.rememberLazyListState
@@ -149,7 +150,8 @@ class MainActivity : ComponentActivity() {
                 val barColor = MaterialTheme.colorScheme.surface
                 SideEffect {
                     val window = (view.context as Activity).window
-                    window.statusBarColor = barColor.toArgb()
+                    WindowCompat.setDecorFitsSystemWindows(window, false)
+                    window.statusBarColor = android.graphics.Color.TRANSPARENT
                     WindowCompat.getInsetsController(window, view).isAppearanceLightStatusBars = !dark
                 }
                 Surface(Modifier.fillMaxSize()) {
@@ -603,9 +605,9 @@ fun GatewayApp() {
                             Avatar(openChat!!, chatName ?: "?", dpCache, 42.dp, RoundedCornerShape(13.dp))
                             Spacer(Modifier.width(12.dp))
                             Column {
-                                Text(title, maxLines = 1, fontWeight = FontWeight.Bold, style = MaterialTheme.typography.titleMedium, modifier = Modifier.widthIn(max = 200.dp).basicMarquee())
+                                Text(title, maxLines = 1, fontWeight = FontWeight.Bold, style = MaterialTheme.typography.titleMedium, modifier = Modifier.widthIn(max = 210.dp).basicMarquee())
                                 val sub = chatPresence?.let { pr -> if (pr.online) "online" else if (pr.lastSeen > 0) "last seen " + fmt(pr.lastSeen * 1000) else "" } ?: ""
-                                Text(if (sub.isNotEmpty()) sub else "tap for info", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                                if (sub.isNotEmpty()) Text(sub, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                             }
                         }
                     } else Text(title)
@@ -648,7 +650,7 @@ fun GatewayApp() {
             )
         }
     ) { pad ->
-        Box(Modifier.fillMaxSize().padding(pad)) {
+        Box(Modifier.fillMaxSize().padding(pad).consumeWindowInsets(pad)) {
             when {
                 !status.registered -> LinkScreen(qr, status.pairingCode,
                     onPair = { n -> scope.launch { try { notify("code: " + GatewayClient.pair(n)) } catch (e: Exception) { notify("pair error: ${e.message}") } } },
@@ -1173,7 +1175,9 @@ private fun NewChatScreen(contacts: List<DeviceContact>, loading: Boolean, dpCac
 private fun ChatsWithStatus(messages: List<GatewayClient.Msg>, statuses: List<GatewayClient.StatusItem>, dpCache: MutableMap<String, ImageBitmap?>, query: String, onLoadStatuses: () -> Unit, onOpenStatus: (GatewayClient.StatusItem) -> Unit, onDelete: (String) -> Unit, onOpen: (String) -> Unit) {
     val pager = rememberPagerState(initialPage = 0) { 2 }
     val cs = rememberCoroutineScope()
-    LaunchedEffect(pager.currentPage) { if (pager.currentPage == 1) onLoadStatuses() }
+    LaunchedEffect(pager.currentPage) {
+        while (pager.currentPage == 1) { onLoadStatuses(); delay(5000) }
+    }
     Column(Modifier.fillMaxSize()) {
         TabRow(selectedTabIndex = pager.currentPage) {
             Tab(selected = pager.currentPage == 0, onClick = { cs.launch { pager.animateScrollToPage(0) } }, text = { Text("Chats") })
