@@ -702,8 +702,13 @@ app.get('/music/stream', async (req, res) => {
     const videoId = String(req.query.videoId || '')
     if (!videoId) return res.status(400).json({ error: 'videoId required' })
     const info = await ytdl.getInfo('https://www.youtube.com/watch?v=' + videoId)
-    const fmt = ytdl.chooseFormat(info.formats, { quality: 'highestaudio', filter: 'audioonly' })
-    res.json({ url: fmt.url, duration: Number(info.videoDetails.lengthSeconds || 0) })
+    // Android MediaPlayer plays M4A/AAC, NOT opus/webm -> prefer itag 140 (m4a)
+    let fmt = (info.formats || []).find(f => f.itag === 140)
+      || (info.formats || []).find(f => f.mimeType && f.mimeType.includes('mp4a') && !f.hasVideo)
+      || (info.formats || []).find(f => f.container === 'm4a')
+    if (!fmt) { try { fmt = ytdl.chooseFormat(info.formats, { quality: 'highestaudio', filter: 'audioonly' }) } catch (_) {} }
+    if (!fmt || !fmt.url) return res.status(404).json({ error: 'no playable audio' })
+    res.json({ url: fmt.url, duration: Number(info.videoDetails.lengthSeconds || 0), mime: fmt.mimeType || '' })
   } catch (e) { log('music stream err', e?.message); res.status(500).json({ error: e?.message }) }
 })
 
