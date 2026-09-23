@@ -360,6 +360,7 @@ fun GatewayApp() {
     // file picker for sending media
     var pendingMedia by remember { mutableStateOf<Pair<Uri, String>?>(null) }
     var chatsPage by remember { mutableStateOf(0) }
+    var storyView by remember { mutableStateOf<String?>(null) }
     var pendingStatus by remember { mutableStateOf<Pair<Uri, String>?>(null) }
     val statusPicker = rememberLauncherForActivityResult(ActivityResultContracts.PickVisualMedia()) { uri: Uri? ->
         if (uri != null) {
@@ -412,9 +413,11 @@ fun GatewayApp() {
         contactsLoading = true
         scope.launch {
             val all = withContext(Dispatchers.IO) { loadDeviceContacts(ctx) }
-            ContactNames.map.clear(); all.forEach { ContactNames.map[it.number] = it.name }
-            val reg = GatewayClient.onWhatsApp(all.map { it.number })
-            deviceContacts = if (reg.isEmpty()) all else all.filter { it.number in reg }
+            ContactNames.map.clear()
+            all.forEach { ContactNames.map[it.number] = it.name }
+            val reg = GatewayClient.onWhatsApp(all.map { it.number })   // number -> lid?
+            all.forEach { c -> reg[c.number]?.let { lid -> if (lid.isNotBlank()) ContactNames.map[lid] = c.name } }
+            deviceContacts = if (reg.isEmpty()) all else all.filter { reg.containsKey(it.number) }
             contactsLoading = false
         }
     }
@@ -487,8 +490,10 @@ fun GatewayApp() {
     LaunchedEffect(Unit) { NodeService.start(ctx) }
     LaunchedEffect(Unit) {
         if (ContextCompat.checkSelfPermission(ctx, Manifest.permission.READ_CONTACTS) == PackageManager.PERMISSION_GRANTED) {
+            // quick names by number first, then full (adds @lid mapping) in background
             val all = withContext(Dispatchers.IO) { loadDeviceContacts(ctx) }
-            ContactNames.map.clear(); all.forEach { ContactNames.map[it.number] = it.name }
+            all.forEach { ContactNames.map[it.number] = it.name }
+            doLoadContacts()
         } else contactsPerm.launch(Manifest.permission.READ_CONTACTS)
     }
     LaunchedEffect(Unit) {
@@ -519,6 +524,12 @@ fun GatewayApp() {
             openChat != null -> openChat = null
             else -> screen = "chats"
         }
+    }
+
+    storyView?.let { sender ->
+        StatusViewer(statuses, sender, dpCache,
+            onDownload = { st -> downloadMedia(scope, ctx, GatewayClient.Msg(st.sender, "", false, st.text, st.ts, st.mediaName, st.mediaType)) { m -> notify(m) } },
+            onClose = { storyView = null })
     }
 
     pendingStatus?.let { ps ->
@@ -752,11 +763,7 @@ fun GatewayApp() {
                 else -> ChatsWithStatus(messages, statuses, dpCache, searchQuery,
                     onPageChange = { chatsPage = it },
                     onLoadStatuses = { scope.launch { statuses = GatewayClient.getStatuses() } },
-                    onOpenStatus = { st ->
-                        val nm = st.mediaName
-                        if (st.mediaType == "video" && nm != null) viewVideoUrl = GatewayClient.mediaUrl(nm)
-                        else if (nm != null) scope.launch { val full = GatewayClient.mediaBytes(nm); val bmp = full?.let { BitmapFactory.decodeByteArray(it, 0, it.size)?.asImageBitmap() } ?: decodeThumb(st.thumb); if (bmp != null) viewImg = bmp }
-                    },
+                    onOpenStatus = { st -> storyView = st.sender },
                     onDelete = { jid -> scope.launch { GatewayClient.deleteChat(jid); messages = GatewayClient.getMessages() } },
                     onOpen = { openChat = it })
             }
@@ -1052,6 +1059,7 @@ private fun SettingsScreen(status: GatewayClient.Status, settings: GatewayClient
                 ToggleRow("Always online", settings.alwaysOnline) { onToggle(JSONObject().put("alwaysOnline", it)) }
                 ToggleRow("Auto-read messages", settings.autoRead) { onToggle(JSONObject().put("autoRead", it)) }
                 ToggleRow("Save media (photos/videos)", settings.saveMedia) { onToggle(JSONObject().put("saveMedia", it)) }
+                ToggleRow("Hide status view (don't show you saw)", settings.hideStatusRead) { onToggle(JSONObject().put("hideStatusRead", it)) }
                 Text("On = incoming media downloaded (needed for view/play/share + deleted media). Uses storage.", style = MaterialTheme.typography.bodySmall)
                 ToggleRow("Freeze last seen (stay offline)", settings.stayOffline) { onToggle(JSONObject().put("stayOffline", it)) }
                 Text("On = never broadcasts online. (Overrides Always online.)", style = MaterialTheme.typography.bodySmall)
@@ -1390,5 +1398,70 @@ private fun AudRadio(label: String, selected: Boolean, onClick: () -> Unit) {
         RadioButton(selected = selected, onClick = onClick)
         Spacer(Modifier.width(6.dp))
         Text(label)
+    }
+}
+
+
+@Composable
+private fun StatusViewer(statuses: List<GatewayClient.StatusItem>, startSender: String, dpCache: MutableMap<String, ImageBitmap?>, onDownload: (GatewayClient.StatusItem) -> Unit, onClose: () -> Unit) {
+    val groups = remember(statuses) {
+        statuses.groupBy { it.sender }.entries
+            .sortedWith(compareByDescending<Map.Entry<String, List<GatewayClient.StatusItem>>> { e -> e.value.any { it.mine } }.thenByDescending { e -> e.value.maxOf { it.ts } })
+            .map { it.key to it.value.sortedBy { s -> s.ts } }
+    }
+    if (groups.isEmpty()) { LaunchedEffect(Unit) { onClose() }; return }
+    var si by remember { mutableStateOf(groups.indexOfFirst { it.first == startSender }.coerceAtLeast(0)) }
+    var ii by remember { mutableStateOf(0) }
+    val group = groups.getOrNull(si) ?: run { LaunchedEffect(Unit) { onClose() }; return }
+    val items = group.second
+    val st = items.getOrNull(ii) ?: run { LaunchedEffect(Unit) { onClose() }; return }
+    fun goNext() { if (ii < items.size - 1) ii++ else if (si < groups.size - 1) { si++; ii = 0 } else onClose() }
+    fun goPrev() { if (ii > 0) ii-- else if (si > 0) { si--; ii = 0 } }
+
+    var bmp by remember(st.mediaName, si, ii) { mutableStateOf<ImageBitmap?>(null) }
+    LaunchedEffect(st.mediaName, si, ii) {
+        bmp = null
+        val name = st.mediaName
+        if (name != null && st.mediaType != "video") {
+            val bytes = GatewayClient.mediaBytes(name)
+            bmp = bytes?.let { BitmapFactory.decodeByteArray(it, 0, it.size)?.asImageBitmap() } ?: decodeThumb(st.thumb)
+        }
+    }
+    LaunchedEffect(si, ii) { if (st.mediaType != "video") { delay(5000); goNext() } }
+
+    Dialog(onDismissRequest = onClose, properties = DialogProperties(usePlatformDefaultWidth = false)) {
+        Surface(Modifier.fillMaxSize(), color = Color.Black) {
+            Box(Modifier.fillMaxSize()) {
+                if (st.mediaType == "video" && st.mediaName != null) {
+                    AndroidView(factory = { c -> VideoView(c).apply { setVideoURI(Uri.parse(GatewayClient.mediaUrl(st.mediaName!!))); setOnPreparedListener { it.start() }; setOnCompletionListener { goNext() } } }, modifier = Modifier.fillMaxSize())
+                } else if (bmp != null) {
+                    Image(bmp!!, null, Modifier.fillMaxSize(), contentScale = ContentScale.Fit)
+                } else {
+                    Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) { Text(st.text.ifBlank { "…" }, color = Color.White, modifier = Modifier.padding(24.dp)) }
+                }
+                if (st.text.isNotBlank() && st.mediaType != null) {
+                    Text(st.text, color = Color.White, modifier = Modifier.align(Alignment.BottomCenter).padding(28.dp))
+                }
+                Row(Modifier.fillMaxSize()) {
+                    Box(Modifier.weight(1f).fillMaxHeight().clickable(interactionSource = remember { MutableInteractionSource() }, indication = null) { goPrev() })
+                    Box(Modifier.weight(1.6f).fillMaxHeight().clickable(interactionSource = remember { MutableInteractionSource() }, indication = null) { goNext() })
+                }
+                Column(Modifier.fillMaxWidth().statusBarsPadding().padding(8.dp)) {
+                    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(3.dp)) {
+                        items.indices.forEach { idx ->
+                            LinearProgressIndicator(progress = { if (idx < ii) 1f else if (idx == ii) 0.6f else 0f }, modifier = Modifier.weight(1f).height(3.dp), color = Color.White, trackColor = Color.White.copy(alpha = 0.3f))
+                        }
+                    }
+                    Spacer(Modifier.height(8.dp))
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Avatar(group.first, group.first.substringBefore("@"), dpCache, 36.dp)
+                        Spacer(Modifier.width(10.dp))
+                        Text(if (items.first().mine) "My Status" else (ContactNames.nameFor(group.first) ?: items.first().name.ifBlank { "Status" }), color = Color.White, fontWeight = FontWeight.Bold, maxLines = 1, modifier = Modifier.weight(1f))
+                        if (st.mediaName != null) IconButton(onClick = { onDownload(st) }) { Icon(Icons.Filled.Download, "download", tint = Color.White) }
+                        IconButton(onClick = onClose) { Icon(Icons.Filled.Close, "close", tint = Color.White) }
+                    }
+                }
+            }
+        }
     }
 }

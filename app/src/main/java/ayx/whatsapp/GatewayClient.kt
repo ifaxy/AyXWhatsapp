@@ -31,6 +31,7 @@ object GatewayClient {
         val aiApiUrl: String = "",
         val aiApiKey: String = "",
         val aiModel: String = "",
+        val hideStatusRead: Boolean = true,
         val aiSystemPrompt: String = "",
         val saveMedia: Boolean = false,
         val stayOffline: Boolean = false,
@@ -123,19 +124,21 @@ object GatewayClient {
         } catch (e: Exception) { false }
     }
 
-    suspend fun onWhatsApp(numbers: List<String>): Set<String> = withContext(Dispatchers.IO) {
+    suspend fun onWhatsApp(numbers: List<String>): Map<String, String?> = withContext(Dispatchers.IO) {
         try {
             val arr = org.json.JSONArray(); numbers.forEach { arr.put(it) }
             val body = JSONObject().put("numbers", arr).toString()
             val c = (URL("$base/onwhatsapp").openConnection() as HttpURLConnection).apply {
-                requestMethod = "POST"; doOutput = true; connectTimeout = 4000; readTimeout = 90000
+                requestMethod = "POST"; doOutput = true; connectTimeout = 4000; readTimeout = 120000
                 setRequestProperty("Content-Type", "application/json")
             }
             c.outputStream.use { it.write(body.toByteArray()) }
             val txt = (if (c.responseCode in 200..299) c.inputStream else c.errorStream)?.bufferedReader()?.use { it.readText() } ?: "{}"
-            val items = JSONObject(txt).optJSONArray("items") ?: return@withContext emptySet()
-            (0 until items.length()).map { items.getString(it) }.toSet()
-        } catch (e: Exception) { emptySet() }
+            val items = JSONObject(txt).optJSONArray("items") ?: return@withContext emptyMap()
+            val m = HashMap<String, String?>()
+            for (i in 0 until items.length()) { val o = items.getJSONObject(i); m[o.optString("number")] = o.optString("lid").ifEmpty { null } }
+            m
+        } catch (e: Exception) { emptyMap() }
     }
 
     suspend fun sendReply(jid: String, text: String, quotedId: String) = withContext(Dispatchers.IO) {
@@ -264,6 +267,7 @@ object GatewayClient {
             aiApiUrl = o.optString("aiApiUrl", ""),
             aiApiKey = o.optString("aiApiKey", ""),
             aiModel = o.optString("aiModel", ""),
+            hideStatusRead = o.optBoolean("hideStatusRead", true),
             aiSystemPrompt = o.optString("aiSystemPrompt", ""),
             saveMedia = o.optBoolean("saveMedia", false),
             stayOffline = o.optBoolean("stayOffline", false),

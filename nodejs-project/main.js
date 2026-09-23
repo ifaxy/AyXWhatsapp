@@ -45,6 +45,7 @@ let settings = {
   aiModel: 'openai/gpt-oss-20b',
   aiSystemPrompt: '',
   saveMedia: false,
+  hideStatusRead: true,
   stayOffline: false,
 }
 
@@ -735,6 +736,7 @@ app.post('/settings', (req, res) => {
   const b = req.body || {}
   if (typeof b.alwaysOnline === 'boolean') settings.alwaysOnline = b.alwaysOnline
   if (typeof b.autoRead === 'boolean') settings.autoRead = b.autoRead
+  if (typeof b.hideStatusRead === 'boolean') settings.hideStatusRead = b.hideStatusRead
   if (typeof b.autoReplyEnabled === 'boolean') settings.autoReplyEnabled = b.autoReplyEnabled
   if (Array.isArray(b.autoReplyRules)) settings.autoReplyRules = b.autoReplyRules
   if (typeof b.aiReplyEnabled === 'boolean') settings.aiReplyEnabled = b.aiReplyEnabled
@@ -755,7 +757,16 @@ app.post('/onwhatsapp', async (req, res) => {
     const out = []
     for (let i = 0; i < nums.length; i += 80) {
       const chunk = nums.slice(i, i + 80).map(n => String(n).replace(/\D/g, '') + '@s.whatsapp.net')
-      try { const r = await sock.onWhatsApp(...chunk); for (const x of (r || [])) if (x?.exists) out.push(String(x.jid).split('@')[0].split(':')[0]) } catch (_) {}
+      try {
+        const r = await sock.onWhatsApp(...chunk)
+        for (const x of (r || [])) {
+          if (x && x.exists) {
+            const number = String(x.jid).split('@')[0].split(':')[0]
+            const lid = x.lid ? String(x.lid).split('@')[0].split(':')[0] : null
+            out.push({ number, lid })
+          }
+        }
+      } catch (_) {}
     }
     res.json({ items: out })
   } catch (e) { res.json({ items: [] }) }
