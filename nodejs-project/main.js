@@ -727,48 +727,35 @@ function deEnt(str) {
   return String(str || '').replace(/&amp;/g, '&').replace(/&quot;/g, '"').replace(/&#039;/g, "'").replace(/&lt;/g, '<').replace(/&gt;/g, '>')
 }
 app.get('/music/search', async (req, res) => {
-  const errs = []
+  const diag = []
   try {
     const q = String(req.query.q || '').trim()
     if (!q) return res.json({ items: [] })
     let items = []
-    // 1) saavn.dev
+    // JioSaavn official API (direct) + DES decrypt
     try {
-      const body = await httpGet('https://saavn.dev/api/search/songs?query=' + encodeURIComponent(q) + '&limit=25')
-      const data = JSON.parse(body)
-      const results = (data && data.data && data.data.results) ? data.data.results : []
-      for (const sng of results) {
-        const dl = sng.downloadUrl || []
-        const best = dl.find(x => x.quality === '320kbps') || dl[dl.length - 1]
-        const url = best && best.url
-        if (!url) continue
+      const url = 'https://www.jiosaavn.com/api.php?__call=search.getResults&_format=json&_marker=0&api_version=4&ctx=web6dot0&q=' + encodeURIComponent(q) + '&p=1&n=30'
+      const body = await httpGet(url, { 'User-Agent': 'Mozilla/5.0 (Linux; Android 12)', 'Accept': 'application/json', 'Referer': 'https://www.jiosaavn.com/' })
+      let data
+      try { data = JSON.parse(body) } catch (pe) { data = JSON.parse(body.replace(/^[^{\[]*/, '')) }
+      const results = (data && data.results) ? data.results : []
+      diag.push('results=' + results.length)
+      let noMedia = 0, noDec = 0
+      for (const it of results) {
+        const mi = it.more_info || {}
+        const enc = mi.encrypted_media_url || it.encrypted_media_url
+        if (!enc) { noMedia++; continue }
+        const audio = saavnDecrypt(enc)
+        if (!audio) { noDec++; continue }
         let artist = ''
-        try { artist = (sng.artists && sng.artists.primary ? sng.artists.primary.map(a => a.name).join(', ') : '') || '' } catch (_) {}
-        const imgs = sng.image || []
-        items.push({ title: deEnt(sng.name || ''), artist: deEnt(artist), image: imgs.length ? (imgs[imgs.length - 1].url || '') : '', url })
+        try { artist = (mi.artistMap && mi.artistMap.primary_artists ? mi.artistMap.primary_artists.map(a => a.name).join(', ') : '') || it.primary_artists || it.subtitle || '' } catch (_) {}
+        items.push({ title: deEnt(it.title || it.song || ''), artist: deEnt(artist), image: String(it.image || '').replace('150x150', '500x500'), url: audio })
       }
-    } catch (e) { errs.push('saavndev:' + (e && e.message)) }
-    // 2) raw JioSaavn
-    if (items.length === 0) {
-      try {
-        const body = await httpGet('https://www.jiosaavn.com/api.php?p=1&q=' + encodeURIComponent(q) + '&_format=json&_marker=0&api_version=4&ctx=web6dot0&n=25&__call=search.getResults')
-        const data = JSON.parse(body)
-        const results = data && data.results ? data.results : []
-        for (const it of results) {
-          const mi = it.more_info || {}
-          const enc = mi.encrypted_media_url || it.encrypted_media_url
-          if (!enc) continue
-          const audio = saavnDecrypt(enc)
-          if (!audio) continue
-          let artist = ''
-          try { artist = (mi.artistMap && mi.artistMap.primary_artists ? mi.artistMap.primary_artists.map(a => a.name).join(', ') : '') || it.primary_artists || it.subtitle || '' } catch (_) {}
-          items.push({ title: deEnt(it.title || it.song || ''), artist: deEnt(artist), image: String(it.image || '').replace('150x150', '500x500'), url: audio })
-        }
-      } catch (e) { errs.push('jiosaavn:' + (e && e.message)) }
-    }
-    log('music search "' + q + '" -> ' + items.length + (errs.length ? ' errs=' + errs.join('|') : ''))
-    res.json({ items: items.slice(0, 25), error: items.length === 0 ? errs.join(' | ') : '' })
-  } catch (e) { res.json({ items: [], error: (e && e.message) + ' | ' + errs.join('|') }) }
+      diag.push('playable=' + items.length + (noMedia ? ' noMedia=' + noMedia : '') + (noDec ? ' noDec=' + noDec : ''))
+    } catch (e) { diag.push('jio_err=' + (e && e.message)) }
+    log('music "' + q + '" ' + diag.join(' | '))
+    res.json({ items: items.slice(0, 25), error: items.length === 0 ? diag.join(' | ') : '' })
+  } catch (e) { res.json({ items: [], error: (e && e.message) + ' | ' + diag.join('|') }) }
 })
 
 app.post('/status/post', async (req, res) => {
