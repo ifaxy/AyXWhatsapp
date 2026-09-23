@@ -20,6 +20,7 @@ const AUTH_DIR = process.env.WAGW_AUTH_DIR || './auth'
 const SETTINGS_FILE = path.join(path.dirname(AUTH_DIR), 'settings.json')
 const MEDIA_DIR = process.env.WAGW_MEDIA_DIR || path.join(path.dirname(AUTH_DIR), 'media')
 const MESSAGES_FILE = path.join(path.dirname(AUTH_DIR), 'messages.json')
+const NAMES_FILE = path.join(path.dirname(AUTH_DIR), 'names.json')
 
 const logger = pino({ level: 'warn' })
 
@@ -80,6 +81,17 @@ function saveSettings() {
 }
 
 let saveMsgTimer = null
+let nameStore = {}
+try { nameStore = JSON.parse(fs.readFileSync(NAMES_FILE, 'utf8')) } catch (_) { nameStore = {} }
+let _namesTimer = null
+function saveNamesDebounced() {
+  if (_namesTimer) return
+  _namesTimer = setTimeout(() => { _namesTimer = null; try { fs.writeFileSync(NAMES_FILE, JSON.stringify(nameStore)) } catch (_) {} }, 1500)
+}
+function rememberName(jid, name) {
+  if (jid && name && String(name).trim() && nameStore[jid] !== String(name).trim()) { nameStore[jid] = String(name).trim(); saveNamesDebounced() }
+}
+
 function saveMessagesDebounced() {
   if (saveMsgTimer) return
   saveMsgTimer = setTimeout(() => {
@@ -138,7 +150,9 @@ function extractText(m) {
 
 function resolveName(msg, jid) {
   const c = contacts.get(jid)
-  return msg.pushName || msg.verifiedBizName || (c && c.name) || ''
+  const n = msg.pushName || msg.verifiedBizName || (c && c.name) || nameStore[jid] || ''
+  if (n && !msg.key.fromMe) rememberName(jid, n)
+  return n
 }
 
 function matchReply(text) {
@@ -390,7 +404,7 @@ function handleUpdates(updates) {
 
 // history sync on link -> fill the message log
 async function handleHistory({ messages, contacts: cts }) {
-  if (cts) for (const c of cts) { if (c.id) contacts.set(c.id, { name: c.name || c.notify || '', notify: c.notify || '' }) }
+  if (cts) for (const c of cts) { if (c.id) { const nm = c.name || c.notify || ''; contacts.set(c.id, { name: nm, notify: c.notify || '' }); rememberName(c.id, nm) } }
   let n = 0
   for (const msg of messages || []) {
     try {
@@ -447,7 +461,7 @@ async function startSocket() {
       if (e) { e.reaction = r.reaction?.text || ''; saveMessagesDebounced() }
     }
   })
-  const addContacts = (list) => { for (const c of list || []) { if (c.id) contacts.set(c.id, { name: c.name || c.notify || '', notify: c.notify || '' }) } }
+  const addContacts = (list) => { for (const c of list || []) { if (c.id) { const nm = c.name || c.notify || ''; contacts.set(c.id, { name: nm, notify: c.notify || '' }); rememberName(c.id, nm) } } }
   sock.ev.on('contacts.upsert', addContacts)
   sock.ev.on('contacts.set', ({ contacts: cs }) => addContacts(cs))
   sock.ev.on('presence.update', ({ id, presences: p }) => {
@@ -543,7 +557,7 @@ app.get('/contacts', (req, res) => {
   const items = []
   for (const [jid, c] of contacts) {
     if (!jid.endsWith('@s.whatsapp.net')) continue
-    items.push({ jid, name: c.name || c.notify || '', number: jid.split('@')[0] })
+    items.push({ jid, name: c.name || c.notify || nameStore[jid] || '', number: jid.split('@')[0] })
   }
   items.sort((a, b) => (a.name || a.number).localeCompare(b.name || b.number))
   res.json({ items })
