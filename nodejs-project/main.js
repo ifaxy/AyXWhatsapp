@@ -4,6 +4,8 @@
 const fs = require('fs')
 const path = require('path')
 const crypto = require('crypto')
+let CryptoJS = null
+try { CryptoJS = require('crypto-js') } catch (e) {}
 const https = require('https')
 const express = require('express')
 const pino = require('pino')
@@ -714,12 +716,23 @@ function httpGet(url, headers) {
 }
 
 function saavnDecrypt(encUrl) {
+  // Try pure-JS DES first (OpenSSL 3 dropped DES from default provider)
+  if (CryptoJS) {
+    try {
+      const key = CryptoJS.enc.Utf8.parse('38346591')
+      const ct = CryptoJS.enc.Base64.parse(encUrl)
+      const dec = CryptoJS.DES.decrypt({ ciphertext: ct }, key, { mode: CryptoJS.mode.ECB, padding: CryptoJS.pad.Pkcs7 })
+      const url = dec.toString(CryptoJS.enc.Utf8)
+      if (url && url.startsWith('http')) return url.replace('_96.mp4', '_320.mp4')
+    } catch (e) {}
+  }
+  // Fallback: native crypto (may work if legacy provider available)
   try {
     const key = Buffer.from('38346591', 'utf8')
     const encrypted = Buffer.from(encUrl, 'base64')
     const decipher = crypto.createDecipheriv('des-ecb', key, null)
     decipher.setAutoPadding(true)
-    let out = decipher.update(encrypted, undefined, 'utf8') + decipher.final('utf8')
+    const out = decipher.update(encrypted, undefined, 'utf8') + decipher.final('utf8')
     return out.replace('_96.mp4', '_320.mp4')
   } catch (e) { return null }
 }
