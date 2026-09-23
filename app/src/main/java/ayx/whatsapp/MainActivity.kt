@@ -324,7 +324,7 @@ fun PrivacyGate(onAgree: () -> Unit) {
 
 class OptMsg(val chat: String, val text: String, val ts: Long, val quotedText: String? = null)
 
-@OptIn(ExperimentalMaterial3Api::class)
+@OptIn(ExperimentalMaterial3Api::class, ExperimentalFoundationApi::class)
 @Composable
 fun GatewayApp() {
     val scope = rememberCoroutineScope()
