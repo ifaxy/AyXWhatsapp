@@ -13,6 +13,8 @@ import android.provider.OpenableColumns
 import android.util.Base64
 import android.media.MediaMetadataRetriever
 import android.media.MediaPlayer
+import java.io.FileOutputStream
+import java.io.File
 import android.app.KeyguardManager
 import android.widget.MediaController
 import android.widget.VideoView
@@ -106,7 +108,6 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import org.json.JSONObject
-import java.io.File
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -364,6 +365,7 @@ fun GatewayApp() {
     var pendingMedia by remember { mutableStateOf<Pair<Uri, String>?>(null) }
     var chatsPage by remember { mutableStateOf(0) }
     var storyView by remember { mutableStateOf<String?>(null) }
+    var processing by remember { mutableStateOf<String?>(null) }
     var myJid by remember { mutableStateOf<String?>(null) }
     LaunchedEffect(status.registered) { if (status.registered) { val j = GatewayClient.getMe(); if (j.isNotBlank()) myJid = j } }
     var pendingLockOpen by remember { mutableStateOf<String?>(null) }
@@ -550,6 +552,18 @@ fun GatewayApp() {
         }
     }
 
+    processing?.let { msg ->
+        Dialog(onDismissRequest = {}) {
+            Surface(shape = RoundedCornerShape(16.dp)) {
+                Column(Modifier.padding(28.dp), horizontalAlignment = Alignment.CenterHorizontally) {
+                    CircularProgressIndicator()
+                    Spacer(Modifier.height(14.dp))
+                    Text(msg)
+                }
+            }
+        }
+    }
+
     storyView?.let { sender ->
         StatusViewer(statuses, sender, dpCache,
             onDownload = { st -> downloadMedia(scope, ctx, GatewayClient.Msg(st.sender, "", false, st.text, st.ts, st.mediaName, st.mediaType)) { m -> notify(m) } },
@@ -559,14 +573,43 @@ fun GatewayApp() {
     }
 
     pendingStatus?.let { ps ->
-        StatusEditor(ps.first, ps.second, deviceContacts, onUpload = { caption, audience, jids ->
+        StatusEditor(ps.first, ps.second, deviceContacts, onUpload = { caption, audience, jids, song, tStart, tEnd ->
             val u = ps.first; val t = ps.second
             pendingStatus = null
             scope.launch {
                 try {
-                    val bytes = withContext(Dispatchers.IO) { ctx.contentResolver.openInputStream(u)?.use { it.readBytes() } }
-                    if (bytes != null) { notify("uploading status…"); val ok = GatewayClient.postStatus(t, Base64.encodeToString(bytes, Base64.NO_WRAP), caption, audience, jids); notify(if (ok) "status uploaded" else "upload failed") }
-                } catch (e: Exception) { notify("upload failed: " + e.message) }
+                    if (song == null) {
+                        val bytes = withContext(Dispatchers.IO) { ctx.contentResolver.openInputStream(u)?.use { it.readBytes() } }
+                        if (bytes != null) { notify("uploading status…"); val ok = GatewayClient.postStatus(t, Base64.encodeToString(bytes, Base64.NO_WRAP), caption, audience, jids); notify(if (ok) "status uploaded" else "upload failed") }
+                    } else {
+                        processing = "Creating video…"
+                        val finalMp4 = withContext(Dispatchers.IO) {
+                            val dir = ctx.cacheDir
+                            val stamp = System.currentTimeMillis()
+                            val vFile = File(dir, "sv_$stamp.mp4")
+                            val aFile = File(dir, "ta_$stamp.m4a")
+                            val outFile = File(dir, "final_$stamp.mp4")
+                            val durMs = (tEnd - tStart).coerceAtLeast(3000L)
+                            val vOk = if (t == "image") MediaTools.photosToVideo(ctx, listOf(u), vFile, durMs) { }
+                                      else runCatching { ctx.contentResolver.openInputStream(u)?.use { inp -> FileOutputStream(vFile).use { inp.copyTo(it) } }; true }.getOrDefault(false)
+                            if (!vOk) return@withContext null
+                            processing = "Preparing audio…"
+                            if (!MediaTools.downloadAndTrimAudio(song.url, aFile, tStart, tEnd)) return@withContext null
+                            processing = "Finalizing video…"
+                            if (!MediaTools.muxVideoAudio(vFile, aFile, outFile)) return@withContext null
+                            runCatching { vFile.delete(); aFile.delete() }
+                            outFile
+                        }
+                        if (finalMp4 != null && finalMp4.exists()) {
+                            processing = "Uploading…"
+                            val bytes = withContext(Dispatchers.IO) { finalMp4.readBytes() }
+                            val ok = GatewayClient.postStatus("video", Base64.encodeToString(bytes, Base64.NO_WRAP), caption, audience, jids)
+                            notify(if (ok) "status uploaded" else "upload failed")
+                            runCatching { finalMp4.delete() }
+                        } else notify("video processing failed")
+                        processing = null
+                    }
+                } catch (e: Exception) { processing = null; notify("failed: " + e.message) }
             }
         }, onCancel = { pendingStatus = null })
     }
@@ -1367,13 +1410,16 @@ private fun LinkText(text: String, color: Color) {
 
 
 @Composable
-private fun StatusEditor(uri: Uri, type: String, contacts: List<DeviceContact>, onUpload: (String, String, List<String>) -> Unit, onCancel: () -> Unit) {
+private fun StatusEditor(uri: Uri, type: String, contacts: List<DeviceContact>, onUpload: (String, String, List<String>, GatewayClient.Song?, Long, Long) -> Unit, onCancel: () -> Unit) {
     val ctx = LocalContext.current
     var caption by remember { mutableStateOf("") }
     var audience by remember { mutableStateOf("all") }
     var selected by remember { mutableStateOf(setOf<String>()) }
     var pickAudience by remember { mutableStateOf(false) }
     var song by remember { mutableStateOf<GatewayClient.Song?>(null) }
+    var trimStart by remember { mutableStateOf(0L) }
+    var trimEnd by remember { mutableStateOf(15000L) }
+    var songToTrim by remember { mutableStateOf<GatewayClient.Song?>(null) }
     var musicOpen by remember { mutableStateOf(false) }
     val player = remember { MediaPlayer() }
     var playing by remember { mutableStateOf(false) }
@@ -1419,13 +1465,16 @@ private fun StatusEditor(uri: Uri, type: String, contacts: List<DeviceContact>, 
                             focusedTextColor = Color.White, unfocusedTextColor = Color.White, cursorColor = Color.White),
                         modifier = Modifier.weight(1f))
                     Spacer(Modifier.width(8.dp))
-                    FilledIconButton(onClick = { onUpload(caption.trim(), audience, selected.toList()) }) { Icon(Icons.AutoMirrored.Filled.Send, "upload") }
+                    FilledIconButton(onClick = { onUpload(caption.trim(), audience, selected.toList(), song, trimStart, trimEnd) }) { Icon(Icons.AutoMirrored.Filled.Send, "upload") }
                 }
             }
         }
     }
     if (pickAudience) AudienceSheet(contacts, audience, selected) { a, sset -> audience = a; selected = sset; pickAudience = false }
-    if (musicOpen) MusicSearchSheet(onPick = { song = it; musicOpen = false }, onClose = { musicOpen = false })
+    if (musicOpen) MusicSearchSheet(onSelect = { songToTrim = it; musicOpen = false }, onClose = { musicOpen = false })
+    songToTrim?.let { sng ->
+        AudioTrimmer(sng, onDone = { st, en -> song = sng; trimStart = st; trimEnd = en; songToTrim = null }, onCancel = { songToTrim = null })
+    }
 }
 
 @Composable
@@ -1582,19 +1631,23 @@ private fun ProfileScreen(myJid: String?, dpCache: MutableMap<String, ImageBitma
 
 
 @Composable
-private fun MusicSearchSheet(onPick: (GatewayClient.Song) -> Unit, onClose: () -> Unit) {
+private fun MusicSearchSheet(onSelect: (GatewayClient.Song) -> Unit, onClose: () -> Unit) {
     var q by remember { mutableStateOf("") }
     var results by remember { mutableStateOf<List<GatewayClient.Song>>(emptyList()) }
     var loading by remember { mutableStateOf(false) }
     var error by remember { mutableStateOf("") }
+    var previewUrl by remember { mutableStateOf<String?>(null) }
+    val player = remember { MediaPlayer() }
+    DisposableEffect(Unit) { onDispose { runCatching { player.release() } } }
     LaunchedEffect(q) {
         if (q.trim().length >= 2) { loading = true; delay(450); val r = GatewayClient.searchMusic(q.trim()); results = r.first; error = r.second; loading = false }
         else { results = emptyList(); error = "" }
     }
-    Dialog(onDismissRequest = onClose) {
+    Dialog(onDismissRequest = { runCatching { player.stop() }; onClose() }) {
         Surface(shape = RoundedCornerShape(16.dp)) {
-            Column(Modifier.padding(12.dp).heightIn(max = 520.dp)) {
+            Column(Modifier.padding(12.dp).heightIn(max = 540.dp)) {
                 Text("Add music", fontWeight = FontWeight.Bold)
+                Text("tap ▶ to preview, tap song to use", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                 Spacer(Modifier.height(8.dp))
                 OutlinedTextField(q, { q = it }, placeholder = { Text("Search songs…") }, leadingIcon = { Icon(Icons.Filled.Search, null) }, singleLine = true, modifier = Modifier.fillMaxWidth())
                 if (loading) LinearProgressIndicator(Modifier.fillMaxWidth().padding(top = 6.dp))
@@ -1604,15 +1657,64 @@ private fun MusicSearchSheet(onPick: (GatewayClient.Song) -> Unit, onClose: () -
                 Spacer(Modifier.height(6.dp))
                 LazyColumn(Modifier.fillMaxWidth()) {
                     itemsIndexed(results) { _, sg ->
-                        Row(Modifier.fillMaxWidth().clickable { onPick(sg) }.padding(vertical = 9.dp), verticalAlignment = Alignment.CenterVertically) {
-                            Icon(Icons.Filled.PlayArrow, null, tint = IOS_BLUE)
-                            Spacer(Modifier.width(10.dp))
-                            Column {
+                        Row(Modifier.fillMaxWidth().clickable { runCatching { player.stop() }; onSelect(sg) }.padding(vertical = 6.dp), verticalAlignment = Alignment.CenterVertically) {
+                            IconButton(onClick = {
+                                if (previewUrl == sg.url) { runCatching { player.pause() }; previewUrl = null }
+                                else runCatching {
+                                    player.reset(); player.setDataSource(sg.url)
+                                    player.setOnPreparedListener { it.start() }
+                                    player.setOnErrorListener { _, _, _ -> previewUrl = null; true }
+                                    player.prepareAsync(); previewUrl = sg.url
+                                }
+                            }) { Icon(if (previewUrl == sg.url) Icons.Filled.Close else Icons.Filled.PlayArrow, "preview", tint = IOS_BLUE) }
+                            Column(Modifier.weight(1f)) {
                                 Text(sg.title, maxLines = 1, overflow = TextOverflow.Ellipsis)
                                 Text(sg.artist, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 1, overflow = TextOverflow.Ellipsis)
                             }
+                            Text("Use", color = IOS_BLUE, modifier = Modifier.padding(horizontal = 6.dp))
                         }
                     }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun AudioTrimmer(song: GatewayClient.Song, onDone: (Long, Long) -> Unit, onCancel: () -> Unit) {
+    val player = remember { MediaPlayer() }
+    var durationMs by remember { mutableStateOf(0L) }
+    var start by remember { mutableStateOf(0f) }
+    var len by remember { mutableStateOf(15000f) }
+    var playing by remember { mutableStateOf(false) }
+    var ready by remember { mutableStateOf(false) }
+    DisposableEffect(Unit) {
+        runCatching {
+            player.setDataSource(song.url)
+            player.setOnPreparedListener { durationMs = it.duration.toLong().coerceAtLeast(1L); ready = true }
+            player.setOnErrorListener { _, _, _ -> true }
+            player.setOnCompletionListener { playing = false }
+            player.prepareAsync()
+        }
+        onDispose { runCatching { player.release() } }
+    }
+    Dialog(onDismissRequest = onCancel) {
+        Surface(shape = RoundedCornerShape(16.dp)) {
+            Column(Modifier.padding(16.dp)) {
+                Text("Trim — " + song.title, fontWeight = FontWeight.Bold, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                Spacer(Modifier.height(10.dp))
+                Text("Start: " + (start / 1000).toInt() + "s     Length: " + (len / 1000).toInt() + "s", style = MaterialTheme.typography.bodySmall)
+                Text("Start position", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                Slider(value = start, onValueChange = { start = it }, valueRange = 0f..(durationMs.toFloat().coerceAtLeast(1f)))
+                Text("Clip length", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                Slider(value = len, onValueChange = { len = it }, valueRange = 3000f..30000f)
+                Spacer(Modifier.height(8.dp))
+                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
+                    TextButton(onClick = { if (playing) { runCatching { player.pause() }; playing = false } else runCatching { player.seekTo(start.toInt()); player.start(); playing = true } }, enabled = ready) { Text(if (playing) "Pause" else "Preview") }
+                    Spacer(Modifier.width(8.dp))
+                    TextButton(onClick = onCancel) { Text("Cancel") }
+                    Spacer(Modifier.width(8.dp))
+                    Button(onClick = { runCatching { player.stop() }; onDone(start.toLong(), (start + len).toLong().coerceAtMost(if (durationMs > 1) durationMs else (start + len).toLong())) }, enabled = ready) { Text("Done") }
                 }
             }
         }
