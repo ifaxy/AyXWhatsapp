@@ -223,6 +223,18 @@ private fun shareMedia(scope: CoroutineScope, ctx: Context, m: GatewayClient.Msg
     }
 }
 
+private fun decodeScaled(path: String, maxDim: Int): android.graphics.Bitmap? {
+    return try {
+        val o1 = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+        BitmapFactory.decodeFile(path, o1)
+        var sample = 1
+        val big = maxOf(o1.outWidth, o1.outHeight)
+        while (big / sample > maxDim) sample *= 2
+        val o2 = BitmapFactory.Options().apply { inSampleSize = sample }
+        BitmapFactory.decodeFile(path, o2)
+    } catch (e: Exception) { null }
+}
+
 data class DeviceContact(val name: String, val number: String)
 
 private fun normNumber(raw: String): String {
@@ -316,33 +328,24 @@ fun GatewayApp() {
 
     // file picker for sending media
     val picker = rememberLauncherForActivityResult(ActivityResultContracts.GetContent()) { uri: Uri? ->
-        val jid = openChat
-        if (uri != null && jid != null) {
-            scope.launch {
-                try {
-                    val cr = ctx.contentResolver
-                    val mime = cr.getType(uri) ?: "application/octet-stream"
-                    val type = when {
-                        mime.startsWith("image") -> "image"; mime.startsWith("video") -> "video"
-                        mime.startsWith("audio") -> "audio"; else -> "document"
-                    }
-                    val bytes = withContext(Dispatchers.IO) { cr.openInputStream(uri)?.use { it.readBytes() } }
-                    if (bytes == null) { notify("can't read file"); return@launch }
-                    notify("sending $type…")
-                    val b64 = Base64.encodeToString(bytes, Base64.NO_WRAP)
-                    GatewayClient.sendMedia(jid, b64, type, queryName(ctx, uri) ?: "file", "")
-                } catch (e: Exception) { notify("send failed: ${e.message}") }
+        if (uri != null && openChat != null) {
+            val mime = ctx.contentResolver.getType(uri) ?: "application/octet-stream"
+            val type = when {
+                mime.startsWith("image") -> "image"; mime.startsWith("video") -> "video"
+                mime.startsWith("audio") -> "audio"; else -> "document"
             }
+            pendingMedia = uri to type
         }
     }
 
     var wallpaper by remember { mutableStateOf<ImageBitmap?>(null) }
     fun loadWallpaper() {
         val f = File(ctx.filesDir, "wallpaper.jpg")
-        wallpaper = if (f.exists()) runCatching { BitmapFactory.decodeFile(f.absolutePath)?.asImageBitmap() }.getOrNull() else null
+        wallpaper = if (f.exists()) runCatching { decodeScaled(f.absolutePath, 1440)?.asImageBitmap() }.getOrNull() else null
     }
     LaunchedEffect(Unit) { loadWallpaper() }
     var cameraUri by remember { mutableStateOf<Uri?>(null) }
+    var pendingMedia by remember { mutableStateOf<Pair<Uri, String>?>(null) }
     val cameraLauncher = rememberLauncherForActivityResult(ActivityResultContracts.TakePicture()) { ok ->
         val jid = openChat; val u = cameraUri
         if (ok && u != null && jid != null) scope.launch {
@@ -409,7 +412,7 @@ fun GatewayApp() {
     fun loadChatWp(jid: String?) {
         val perChat = jid?.let { File(ctx.filesDir, "wp_${it.hashCode()}.jpg") }
         val f = if (perChat != null && perChat.exists()) perChat else File(ctx.filesDir, "wallpaper.jpg")
-        chatWp = if (f.exists()) runCatching { BitmapFactory.decodeFile(f.absolutePath)?.asImageBitmap() }.getOrNull() else null
+        chatWp = if (f.exists()) runCatching { decodeScaled(f.absolutePath, 1440)?.asImageBitmap() }.getOrNull() else null
     }
     val chatWallpaperPicker = rememberLauncherForActivityResult(ActivityResultContracts.GetContent()) { uri: Uri? ->
         val jid = openChat
@@ -480,6 +483,48 @@ fun GatewayApp() {
             viewVideoUrl != null -> viewVideoUrl = null
             openChat != null -> openChat = null
             else -> screen = "chats"
+        }
+    }
+
+    pendingMedia?.let { pm ->
+        val uri = pm.first; val mtype = pm.second
+        var cap by remember(uri) { mutableStateOf("") }
+        var original by remember(uri) { mutableStateOf(false) }
+        Dialog(onDismissRequest = { pendingMedia = null }) {
+            Surface(shape = RoundedCornerShape(16.dp)) {
+                Column(Modifier.padding(16.dp).widthIn(max = 340.dp)) {
+                    Text("Send " + mtype, style = MaterialTheme.typography.titleMedium)
+                    Spacer(Modifier.height(8.dp))
+                    if (mtype == "image") {
+                        val bmp = remember(uri) { runCatching { ctx.contentResolver.openInputStream(uri)?.use { BitmapFactory.decodeStream(it)?.asImageBitmap() } }.getOrNull() }
+                        bmp?.let { Image(it, null, Modifier.fillMaxWidth().heightIn(max = 240.dp), contentScale = ContentScale.Fit) }
+                    } else Text(queryName(ctx, uri) ?: "file", style = MaterialTheme.typography.bodySmall)
+                    Spacer(Modifier.height(8.dp))
+                    OutlinedTextField(cap, { cap = it }, placeholder = { Text("Add a caption…") }, modifier = Modifier.fillMaxWidth())
+                    if (mtype == "image" || mtype == "video") {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Checkbox(original, { original = it })
+                            Text("Original quality (send as file)", style = MaterialTheme.typography.bodySmall)
+                        }
+                    }
+                    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
+                        TextButton(onClick = { pendingMedia = null }) { Text("Cancel") }
+                        Button(onClick = {
+                            val jid = openChat; val u = uri
+                            val sendType = if (original) "document" else mtype; val caption = cap.trim()
+                            pendingMedia = null
+                            if (jid != null) scope.launch {
+                                try {
+                                    val bytes = withContext(Dispatchers.IO) { ctx.contentResolver.openInputStream(u)?.use { it.readBytes() } }
+                                    if (bytes == null) { notify("can't read file"); return@launch }
+                                    notify("sending…")
+                                    GatewayClient.sendMedia(jid, Base64.encodeToString(bytes, Base64.NO_WRAP), sendType, queryName(ctx, u) ?: "file", caption)
+                                } catch (e: Exception) { notify("send failed: ${e.message}") }
+                            }
+                        }) { Text("Send") }
+                    }
+                }
+            }
         }
     }
 
@@ -631,7 +676,7 @@ fun GatewayApp() {
                     onShare = { shareMedia(scope, ctx, it) { s -> notify(s) } },
                     onDownload = { downloadMedia(scope, ctx, it) { s -> notify(s) } },
                     onReact = { m, e -> scope.launch { m.id?.let { GatewayClient.react(m.chat, it, e, m.fromMe) } } },
-                    onDeleteMsg = { m, everyone -> scope.launch { m.id?.let { GatewayClient.deleteMessage(m.chat, it, everyone, m.fromMe); messages = GatewayClient.getMessages() } } },
+                    onDeleteMsg = { m, everyone -> scope.launch { GatewayClient.deleteMessage(m.chat, m.id, m.text, m.ts, everyone, m.fromMe); messages = GatewayClient.getMessages() } },
                     onAttach = { picker.launch("*/*") },
                     onCamera = { openCamera() },
                     onReplySend = { text, qid, qtext ->
@@ -781,7 +826,7 @@ private fun ChatDetail(
         LazyColumn(state = listState, reverseLayout = true, modifier = Modifier.weight(1f).fillMaxWidth().padding(horizontal = 8.dp),
             verticalArrangement = Arrangement.spacedBy(3.dp)) {
             item { Spacer(Modifier.height(6.dp)) }
-            itemsIndexed(rows, key = { i, m -> "${m.ts}-$i" }) { _, m -> MessageBubble(m, previewCache, dpCache, onMedia, onShare, onDownload, onReply = { replyTo = it }) { reactMsg = it } }
+            itemsIndexed(rows, key = { i, m -> "${m.ts}-$i" }) { _, m -> Box(Modifier.fillMaxWidth().animateItem()) { MessageBubble(m, previewCache, dpCache, onMedia, onShare, onDownload, onReply = { replyTo = it }) { reactMsg = it } } }
         }
         replyTo?.let { rt ->
             Row(Modifier.fillMaxWidth().padding(start = 12.dp, end = 6.dp, top = 4.dp), verticalAlignment = Alignment.CenterVertically) {

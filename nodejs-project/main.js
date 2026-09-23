@@ -529,10 +529,12 @@ app.post('/message/delete', async (req, res) => {
     const id = String(req.body?.id || '')
     const forEveryone = !!req.body?.forEveryone
     const fromMe = !!req.body?.fromMe
-    if (!jid || !id) return res.status(400).json({ error: 'jid,id required' })
-    if (forEveryone && sock) { try { await sock.sendMessage(jid, { delete: { remoteJid: jid, id, fromMe } }) } catch (_) {} }
-    msgLog = msgLog.filter(m => m.id !== id)
-    msgStore.delete(id)
+    const text = req.body?.text
+    const ts = Number(req.body?.ts || 0)
+    if (!jid) return res.status(400).json({ error: 'jid required' })
+    if (forEveryone && sock && id) { try { await sock.sendMessage(jid, { delete: { remoteJid: jid, id, fromMe } }) } catch (_) {} }
+    if (id) { msgLog = msgLog.filter(m => m.id !== id); msgStore.delete(id) }
+    else if (text != null) { msgLog = msgLog.filter(m => !(m.text === text && Math.abs((m.ts || 0) - ts) < 6000)) }
     saveMessagesDebounced()
     res.json({ ok: true })
   } catch (e) { res.status(500).json({ error: e?.message }) }
@@ -612,7 +614,7 @@ app.post('/sendmedia', async (req, res) => {
     if (type === 'image') content = { image: buf, caption }
     else if (type === 'video') content = { video: buf, caption }
     else if (type === 'audio') content = { audio: buf, mimetype: 'audio/mp4' }
-    else content = { document: buf, fileName: filename, mimetype: 'application/octet-stream' }
+    else content = { document: buf, fileName: filename, mimetype: 'application/octet-stream', caption }
     const r = await sock.sendMessage(jid, content)
     res.json({ ok: true, id: r?.key?.id || null })
   } catch (e) { log('sendmedia error', e?.message); res.status(500).json({ error: e?.message || 'send failed' }) }

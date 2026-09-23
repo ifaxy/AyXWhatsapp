@@ -128,8 +128,10 @@ object GatewayClient {
         post("/sendreply", JSONObject().put("jid", jid).put("text", text).put("quotedId", quotedId)).optBoolean("ok", false)
     }
 
-    suspend fun deleteMessage(jid: String, id: String, forEveryone: Boolean, fromMe: Boolean) = withContext(Dispatchers.IO) {
-        post("/message/delete", JSONObject().put("jid", jid).put("id", id).put("forEveryone", forEveryone).put("fromMe", fromMe)).optBoolean("ok", false)
+    suspend fun deleteMessage(jid: String, id: String?, text: String, ts: Long, forEveryone: Boolean, fromMe: Boolean) = withContext(Dispatchers.IO) {
+        val o = JSONObject().put("jid", jid).put("forEveryone", forEveryone).put("fromMe", fromMe).put("text", text).put("ts", ts)
+        if (id != null) o.put("id", id)
+        post("/message/delete", o).optBoolean("ok", false)
     }
     suspend fun getContacts(): List<Contact> = withContext(Dispatchers.IO) {
         try {
