@@ -11,8 +11,8 @@ android {
         applicationId = "ayx.whatsapp"
         minSdk = 24
         targetSdk = 34
-        versionCode = 18
-        versionName = "1.8"
+        versionCode = 19
+        versionName = "1.9"
 
         ndk {
             // Ship arm64 only for the spike (covers essentially all modern phones).
@@ -33,7 +33,7 @@ android {
                 storePassword = System.getenv("KEYSTORE_PASSWORD")
                 keyAlias = System.getenv("KEY_ALIAS")
                 keyPassword = System.getenv("KEY_PASSWORD")
-                enableV1Signing = false   // no legacy JAR sig (fixes nested-zip verify)
+                enableV1Signing = true    // OK now: .so uncompressed + zip noCompress
                 enableV2Signing = true
                 enableV3Signing = true
             }
@@ -81,7 +81,7 @@ android {
     packaging {
         // Extract libnode.so to the filesystem (safer for the embedded runtime).
         jniLibs {
-            useLegacyPackaging = true
+            useLegacyPackaging = false
         }
         resources {
             excludes += "/META-INF/{AL2.0,LGPL2.1}"
