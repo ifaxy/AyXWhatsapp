@@ -202,6 +202,9 @@ object GatewayClient {
 
     data class StatusItem(val sender: String, val name: String, val text: String,
         val mediaName: String? = null, val mediaType: String? = null, val thumb: String? = null, val ts: Long = 0L, val mine: Boolean = false)
+    suspend fun getMe(): String = withContext(Dispatchers.IO) {
+        try { get("/me").optString("jid") } catch (e: Exception) { "" }
+    }
     suspend fun getStatuses(): List<StatusItem> = withContext(Dispatchers.IO) {
         try {
             val arr = get("/statuses").optJSONArray("items") ?: return@withContext emptyList()

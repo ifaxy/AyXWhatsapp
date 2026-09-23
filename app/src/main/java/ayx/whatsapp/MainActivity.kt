@@ -13,6 +13,7 @@ import android.provider.OpenableColumns
 import android.util.Base64
 import android.media.MediaMetadataRetriever
 import android.media.MediaPlayer
+import android.app.KeyguardManager
 import android.widget.MediaController
 import android.widget.VideoView
 import androidx.activity.ComponentActivity
@@ -179,6 +180,16 @@ class MainActivity : ComponentActivity() {
 
 private val timeFmt = SimpleDateFormat("h:mm a", Locale.getDefault())
 private fun fmt(ts: Long) = if (ts > 0) timeFmt.format(Date(ts)).lowercase(Locale.getDefault()) else ""
+
+object ChatFlags {
+    val hidden = androidx.compose.runtime.mutableStateMapOf<String, Boolean>()
+    val locked = androidx.compose.runtime.mutableStateMapOf<String, Boolean>()
+    var reveal by androidx.compose.runtime.mutableStateOf(false)
+    var prefs: android.content.SharedPreferences? = null
+    private fun save() { prefs?.edit()?.putStringSet("hidden", hidden.keys.toSet())?.putStringSet("locked", locked.keys.toSet())?.apply() }
+    fun toggleHidden(jid: String) { if (hidden[jid] == true) hidden.remove(jid) else hidden[jid] = true; save() }
+    fun toggleLocked(jid: String) { if (locked[jid] == true) locked.remove(jid) else locked[jid] = true; save() }
+}
 
 object ContactNames {
     val map = mutableStateMapOf<String, String>()  // number(digits) -> display name (observable)
@@ -361,6 +372,22 @@ fun GatewayApp() {
     var pendingMedia by remember { mutableStateOf<Pair<Uri, String>?>(null) }
     var chatsPage by remember { mutableStateOf(0) }
     var storyView by remember { mutableStateOf<String?>(null) }
+    var myJid by remember { mutableStateOf<String?>(null) }
+    LaunchedEffect(status.registered) { if (status.registered) { val j = GatewayClient.getMe(); if (j.isNotBlank()) myJid = j } }
+    // load hide/lock flags once
+    LaunchedEffect(Unit) {
+        ChatFlags.prefs = blkPrefs
+        blkPrefs.getStringSet("hidden", emptySet())!!.forEach { ChatFlags.hidden[it] = true }
+        blkPrefs.getStringSet("locked", emptySet())!!.forEach { ChatFlags.locked[it] = true }
+    }
+    var pendingLockOpen by remember { mutableStateOf<String?>(null) }
+    val unlockLauncher = rememberLauncherForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
+        if (result.resultCode == android.app.Activity.RESULT_OK) pendingLockOpen?.let { openChat = it }
+        pendingLockOpen = null
+    }
+    val revealUnlock = rememberLauncherForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
+        if (result.resultCode == android.app.Activity.RESULT_OK) ChatFlags.reveal = true
+    }
     var pendingStatus by remember { mutableStateOf<Pair<Uri, String>?>(null) }
     val statusPicker = rememberLauncherForActivityResult(ActivityResultContracts.PickVisualMedia()) { uri: Uri? ->
         if (uri != null) {
@@ -688,6 +715,8 @@ fun GatewayApp() {
                         IconButton(onClick = { if (openChat != null) openChat = null else screen = "chats" }) {
                             Icon(Icons.AutoMirrored.Filled.ArrowBack, "back")
                         }
+                    else if (status.registered && myJid != null)
+                        Box(Modifier.padding(start = 10.dp).clip(CircleShape).clickable { profilePicPicker.launch("image/*") }) { Avatar(myJid!!, "Me", dpCache, 34.dp) }
                 },
                 actions = {
                     if (status.registered && openChat == null && screen == "chats") {
@@ -696,6 +725,19 @@ fun GatewayApp() {
                         } else {
                             IconButton(onClick = { searchMode = true }) { Icon(Icons.Filled.Search, "search") }
                             IconButton(onClick = { screen = "settings" }) { Icon(Icons.Filled.Settings, "settings") }
+                            var homeMenu by remember { mutableStateOf(false) }
+                            IconButton(onClick = { homeMenu = true }) { Icon(Icons.Filled.MoreVert, "more") }
+                            DropdownMenu(expanded = homeMenu, onDismissRequest = { homeMenu = false }) {
+                                DropdownMenuItem(text = { Text(if (ChatFlags.reveal) "Hide hidden chats" else "Show hidden chats") }, onClick = {
+                                    homeMenu = false
+                                    if (ChatFlags.reveal) ChatFlags.reveal = false
+                                    else {
+                                        val km = ctx.getSystemService(KeyguardManager::class.java)
+                                        if (km != null && km.isKeyguardSecure) revealUnlock.launch(km.createConfirmDeviceCredentialIntent("Show hidden chats", "Verify to reveal"))
+                                        else ChatFlags.reveal = true
+                                    }
+                                })
+                            }
                         }
                     }
                     if (openChat != null) {
@@ -765,7 +807,15 @@ fun GatewayApp() {
                     onLoadStatuses = { scope.launch { statuses = GatewayClient.getStatuses() } },
                     onOpenStatus = { st -> storyView = st.sender },
                     onDelete = { jid -> scope.launch { GatewayClient.deleteChat(jid); messages = GatewayClient.getMessages() } },
-                    onOpen = { openChat = it })
+                    onOpen = { jid ->
+                        if (ChatFlags.locked[jid] == true) {
+                            val km = ctx.getSystemService(KeyguardManager::class.java)
+                            if (km != null && km.isKeyguardSecure) {
+                                pendingLockOpen = jid
+                                unlockLauncher.launch(km.createConfirmDeviceCredentialIntent("Unlock chat", "Verify to open this chat"))
+                            } else openChat = jid
+                        } else openChat = jid
+                    })
             }
             toast?.let {
                 Surface(color = MaterialTheme.colorScheme.inverseSurface, shape = RoundedCornerShape(8.dp),
@@ -796,6 +846,7 @@ private fun Avatar(jid: String, name: String, cache: MutableMap<String, ImageBit
 @Composable
 private fun ChatList(messages: List<GatewayClient.Msg>, dpCache: MutableMap<String, ImageBitmap?>, query: String, onDelete: (String) -> Unit, onOpen: (String) -> Unit) {
     val groups = messages.groupBy { it.chat }.entries
+        .filter { ChatFlags.reveal || ChatFlags.hidden[it.key] != true }
         .filter { query.isBlank() || chatTitle(it.value).contains(query, true) || it.key.contains(query) }
         .sortedByDescending { it.value.maxOf { m -> m.ts } }
     if (groups.isEmpty()) {
@@ -826,6 +877,8 @@ private fun ChatList(messages: List<GatewayClient.Msg>, dpCache: MutableMap<Stri
                 }
             }
             DropdownMenu(expanded = menu, onDismissRequest = { menu = false }) {
+                DropdownMenuItem(text = { Text(if (ChatFlags.hidden[entry.key] == true) "Unhide chat" else "Hide chat") }, onClick = { menu = false; ChatFlags.toggleHidden(entry.key) })
+                DropdownMenuItem(text = { Text(if (ChatFlags.locked[entry.key] == true) "Unlock chat" else "Lock chat") }, onClick = { menu = false; ChatFlags.toggleLocked(entry.key) })
                 DropdownMenuItem(text = { Text("Delete chat") }, onClick = { menu = false; onDelete(entry.key) })
             }
           }

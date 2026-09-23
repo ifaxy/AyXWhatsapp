@@ -151,8 +151,15 @@ function extractText(m) {
 
 function resolveName(msg, jid) {
   const c = contacts.get(jid)
-  const n = msg.pushName || msg.verifiedBizName || (c && c.name) || nameStore[jid] || ''
-  if (n && !msg.key.fromMe) rememberName(jid, n)
+  let n = msg.pushName || msg.verifiedBizName || (c && c.name) || nameStore[jid] || ''
+  if (!n && jid && jid.endsWith('@lid') && sock) {
+    try {
+      const lm = sock.signalRepository && sock.signalRepository.lidMapping
+      const pn = lm && lm.getPNForLID && lm.getPNForLID(jid)
+      if (pn) { const c2 = contacts.get(pn); n = (c2 && c2.name) || nameStore[pn] || ''; if (n) { rememberName(jid, n) } }
+    } catch (_) {}
+  }
+  if (n && !(msg.key && msg.key.fromMe)) rememberName(jid, n)
   return n
 }
 
@@ -464,6 +471,7 @@ async function startSocket() {
   })
   const addContacts = (list) => { for (const c of list || []) { if (c.id) { const nm = c.name || c.notify || ''; contacts.set(c.id, { name: nm, notify: c.notify || '' }); rememberName(c.id, nm) } } }
   sock.ev.on('contacts.upsert', addContacts)
+  sock.ev.on('contacts.update', addContacts)
   sock.ev.on('contacts.set', ({ contacts: cs }) => addContacts(cs))
   sock.ev.on('presence.update', ({ id, presences: p }) => {
     if (!id || !p) return
@@ -772,6 +780,10 @@ app.post('/onwhatsapp', async (req, res) => {
   } catch (e) { res.json({ items: [] }) }
 })
 
+app.get('/me', (req, res) => {
+  const jid = (sock && sock.user && sock.user.id) ? sock.user.id.split(':')[0] + '@s.whatsapp.net' : ''
+  res.json({ jid, name: (sock && sock.user && sock.user.name) || '' })
+})
 app.get('/statuses', (req, res) => res.json({ items: statuses.slice(0, 120) }))
 app.get('/messages', (req, res) => res.json({ items: msgLog.slice(0, 200) }))
 app.get('/deleted', (req, res) => res.json({ items: deletedList }))
