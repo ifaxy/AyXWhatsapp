@@ -31,6 +31,8 @@ import androidx.compose.foundation.pager.HorizontalPager
 import androidx.compose.foundation.pager.rememberPagerState
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.unit.IntOffset
+import kotlin.math.roundToInt
 import android.provider.ContactsContract
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.isSystemInDarkTheme
@@ -348,7 +350,8 @@ fun GatewayApp() {
         if (granted) cameraUri?.let { cameraLauncher.launch(it) } else notify("camera permission needed")
     }
     fun openCamera() {
-        val f = File(ctx.cacheDir, "cam_" + System.currentTimeMillis() + ".jpg")
+        val dir = File(ctx.cacheDir, "shared").apply { mkdirs() }
+        val f = File(dir, "cam_" + System.currentTimeMillis() + ".jpg")
         val u = FileProvider.getUriForFile(ctx, ctx.packageName + ".fileprovider", f)
         cameraUri = u
         if (ContextCompat.checkSelfPermission(ctx, Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED) cameraLauncher.launch(u)
@@ -356,14 +359,22 @@ fun GatewayApp() {
     }
 
     var deviceContacts by remember { mutableStateOf<List<DeviceContact>>(emptyList()) }
+    var contactsLoading by remember { mutableStateOf(false) }
+    fun doLoadContacts() {
+        contactsLoading = true
+        scope.launch {
+            val all = withContext(Dispatchers.IO) { loadDeviceContacts(ctx) }
+            val reg = GatewayClient.onWhatsApp(all.map { it.number })
+            deviceContacts = if (reg.isEmpty()) all else all.filter { it.number in reg }
+            contactsLoading = false
+        }
+    }
     val contactsPerm = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
-        if (granted) scope.launch { deviceContacts = withContext(Dispatchers.IO) { loadDeviceContacts(ctx) } }
-        else notify("contacts permission needed")
+        if (granted) doLoadContacts() else notify("contacts permission needed")
     }
     fun ensureContacts() {
-        if (deviceContacts.isNotEmpty()) return
-        if (ContextCompat.checkSelfPermission(ctx, Manifest.permission.READ_CONTACTS) == PackageManager.PERMISSION_GRANTED)
-            scope.launch { deviceContacts = withContext(Dispatchers.IO) { loadDeviceContacts(ctx) } }
+        if (deviceContacts.isNotEmpty() || contactsLoading) return
+        if (ContextCompat.checkSelfPermission(ctx, Manifest.permission.READ_CONTACTS) == PackageManager.PERMISSION_GRANTED) doLoadContacts()
         else contactsPerm.launch(Manifest.permission.READ_CONTACTS)
     }
 
@@ -632,9 +643,8 @@ fun GatewayApp() {
                     onRemoveWallpaper = { File(ctx.filesDir, "wallpaper.jpg").delete(); loadWallpaper(); notify("wallpaper removed") },
                     onPickPhoto = { profilePicPicker.launch("image/*") },
                     onSaveName = { n -> scope.launch { runCatching { GatewayClient.setProfileName(n) }.onSuccess { notify("name updated") }.onFailure { notify("name: ${it.message}") } } })
-                screen == "newchat" -> NewChatScreen(deviceContacts, dpCache,
-                    onPickNumber = { num -> openChat = num + "@s.whatsapp.net"; screen = "chats" },
-                    onClose = { screen = "chats" })
+                screen == "newchat" -> NewChatScreen(deviceContacts, contactsLoading, dpCache,
+                    onPickNumber = { num -> openChat = num + "@s.whatsapp.net"; screen = "chats" })
                 else -> ChatsWithStatus(messages, statuses, dpCache, searchQuery,
                     onLoadStatuses = { scope.launch { statuses = GatewayClient.getStatuses() } },
                     onOpenStatus = { st ->
@@ -843,14 +853,29 @@ private fun MessageBubble(m: GatewayClient.Msg, previewCache: MutableMap<String,
     LaunchedEffect(name) { if (name != null && !previewCache.containsKey(name)) previewCache[name] = loadPreview(ctx, m) }
     val preview = (name?.let { previewCache[it] }) ?: remember(m.thumb) { decodeThumb(m.thumb) }
 
+    var swipeX by remember(m.id) { mutableStateOf(0f) }
     Row(Modifier.fillMaxWidth().padding(vertical = 1.dp)
         .pointerInput(m.id) {
-            var dx = 0f
-            detectHorizontalDragGestures(onDragEnd = { if (dx > 55f) onReply(m); dx = 0f }, onHorizontalDrag = { _, amt -> dx += amt })
-        }, horizontalArrangement = if (m.fromMe) Arrangement.End else Arrangement.Start) {
+            detectHorizontalDragGestures(
+                onDragEnd = { if (swipeX > 55f) onReply(m); swipeX = 0f },
+                onDragCancel = { swipeX = 0f },
+                onHorizontalDrag = { _, amt -> swipeX = (swipeX + amt).coerceIn(0f, 130f) }
+            )
+        }
+        .offset { IntOffset(swipeX.roundToInt(), 0) },
+        horizontalArrangement = if (m.fromMe) Arrangement.End else Arrangement.Start) {
         Surface(color = bubbleColor, shape = shape,
             modifier = Modifier.widthIn(max = 290.dp).combinedClickable(interactionSource = remember { MutableInteractionSource() }, indication = null, onClick = {}, onLongClick = { onLongClick(m) })) {
             Column(Modifier.padding(4.dp), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                if (!m.quotedText.isNullOrBlank()) {
+                    Row(Modifier.padding(horizontal = 6.dp, vertical = 2.dp)) {
+                        Box(Modifier.width(3.dp).height(30.dp).background(if (m.fromMe) Color.White.copy(alpha = 0.7f) else IOS_BLUE, RoundedCornerShape(2.dp)))
+                        Spacer(Modifier.width(6.dp))
+                        Text(m.quotedText!!, style = MaterialTheme.typography.bodySmall,
+                            color = if (m.fromMe) Color.White.copy(alpha = 0.85f) else MaterialTheme.colorScheme.onSurfaceVariant,
+                            maxLines = 2, overflow = TextOverflow.Ellipsis)
+                    }
+                }
                 if (!m.fromMe && m.chat.endsWith("@g.us") && !m.name.isNullOrBlank()) {
                     Text(m.name, style = MaterialTheme.typography.labelMedium, color = IOS_BLUE,
                         modifier = Modifier.padding(horizontal = 8.dp))
@@ -1049,30 +1074,44 @@ private fun LinkScreen(qr: ImageBitmap?, pairingCode: String?, onPair: (String) 
 
 
 @Composable
-private fun NewChatScreen(contacts: List<DeviceContact>, dpCache: MutableMap<String, ImageBitmap?>, onPickNumber: (String) -> Unit, onClose: () -> Unit) {
+private fun NewChatScreen(contacts: List<DeviceContact>, loading: Boolean, dpCache: MutableMap<String, ImageBitmap?>, onPickNumber: (String) -> Unit) {
     var q by remember { mutableStateOf("") }
-    var manual by remember { mutableStateOf("91") }
     val filtered = remember(contacts, q) {
         if (q.isBlank()) contacts else contacts.filter { it.name.contains(q, true) || it.number.contains(q) }
     }
-    Column(Modifier.fillMaxSize().padding(12.dp)) {
-        OutlinedTextField(manual, { v -> manual = v.filter { it.isDigit() } }, label = { Text("Number with country code") }, singleLine = true, modifier = Modifier.fillMaxWidth())
-        Button(onClick = { if (manual.length in 8..15) onPickNumber(manual) }, enabled = manual.length in 8..15, modifier = Modifier.fillMaxWidth().padding(top = 6.dp)) { Text("Start chat") }
+    Column(Modifier.fillMaxSize().padding(horizontal = 12.dp)) {
         Spacer(Modifier.height(10.dp))
-        OutlinedTextField(q, { q = it }, label = { Text("Search contacts") }, singleLine = true, modifier = Modifier.fillMaxWidth())
+        OutlinedTextField(q, { q = it }, placeholder = { Text("Search name or number") },
+            leadingIcon = { Icon(Icons.Filled.Search, null, tint = IOS_BLUE) },
+            singleLine = true, shape = RoundedCornerShape(28.dp),
+            colors = OutlinedTextFieldDefaults.colors(
+                focusedBorderColor = Color.Transparent, unfocusedBorderColor = Color.Transparent,
+                focusedContainerColor = MaterialTheme.colorScheme.surfaceVariant,
+                unfocusedContainerColor = MaterialTheme.colorScheme.surfaceVariant),
+            modifier = Modifier.fillMaxWidth())
         Spacer(Modifier.height(8.dp))
-        if (contacts.isEmpty()) {
-            Text("Grant contacts permission to see your contacts, or type a number above.", style = MaterialTheme.typography.bodySmall)
-        } else {
-            Text("${filtered.size} contacts", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-            LazyColumn(Modifier.fillMaxSize()) {
-                itemsIndexed(filtered) { _, c ->
-                    Row(Modifier.fillMaxWidth().clickable { onPickNumber(c.number) }.padding(vertical = 10.dp), verticalAlignment = Alignment.CenterVertically) {
-                        Avatar(c.number + "@s.whatsapp.net", c.name, dpCache, 44.dp)
-                        Spacer(Modifier.width(12.dp))
-                        Column {
-                            Text(c.name, style = MaterialTheme.typography.bodyLarge, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                            Text("+" + c.number, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        when {
+            loading -> Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                    CircularProgressIndicator()
+                    Spacer(Modifier.height(10.dp))
+                    Text("Finding your WhatsApp contacts…", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                }
+            }
+            contacts.isEmpty() -> Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                Text("No WhatsApp contacts found", color = MaterialTheme.colorScheme.onSurfaceVariant)
+            }
+            else -> {
+                Text("${filtered.size} contacts on WhatsApp", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.padding(start = 4.dp, bottom = 4.dp))
+                LazyColumn(Modifier.fillMaxSize()) {
+                    itemsIndexed(filtered) { _, c ->
+                        Row(Modifier.fillMaxWidth().clickable { onPickNumber(c.number) }.padding(vertical = 10.dp), verticalAlignment = Alignment.CenterVertically) {
+                            Avatar(c.number + "@s.whatsapp.net", c.name, dpCache, 46.dp)
+                            Spacer(Modifier.width(12.dp))
+                            Column {
+                                Text(c.name, style = MaterialTheme.typography.bodyLarge, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                                Text("+" + c.number, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                            }
                         }
                     }
                 }

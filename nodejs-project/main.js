@@ -49,6 +49,7 @@ let settings = {
 
 // stores for anti-delete + history (in-memory; reset on app restart)
 const msgStore = new Map()  // id -> { chat, fromMe, text, ts }
+const rawStore = new Map()  // id -> { key, message } for native quoted replies
 let deletedList = []        // [{ chat, fromMe, text, ts }]
 let msgLog = []             // [{ chat, fromMe, text, ts }]
 const chatHistory = new Map()  // jid -> [{ role:'user'|'assistant', content }] for AI context
@@ -237,6 +238,31 @@ function mediaKind(m) {
   return null
 }
 
+function quotedOf(message) {
+  if (!message) return null
+  for (const k of Object.keys(message)) {
+    const ci = message[k] && message[k].contextInfo
+    if (ci && ci.quotedMessage) return { text: extractText(ci.quotedMessage) || '[media]', sender: ci.participant || '' }
+  }
+  return null
+}
+
+function unwrapInner(message) {
+  let m = message
+  for (let i = 0; i < 5 && m; i++) {
+    if (m.ephemeralMessage?.message) { m = m.ephemeralMessage.message; continue }
+    if (m.viewOnceMessage?.message) { m = m.viewOnceMessage.message; continue }
+    if (m.viewOnceMessageV2?.message) { m = m.viewOnceMessageV2.message; continue }
+    if (m.viewOnceMessageV2Extension?.message) { m = m.viewOnceMessageV2Extension.message; continue }
+    if (m.deviceSentMessage?.message) { m = m.deviceSentMessage.message; continue }
+    if (m.documentWithCaptionMessage?.message) { m = m.documentWithCaptionMessage.message; continue }
+    break
+  }
+  if (m?.imageMessage) m.imageMessage.viewOnce = false
+  if (m?.videoMessage) m.videoMessage.viewOnce = false
+  return m
+}
+
 async function enrichMedia(msg, entry) {
   const kind = mediaKind(msg.message)
   if (!kind) return
@@ -261,13 +287,7 @@ async function handleMessages({ messages, type }) {
   for (const msg of messages || []) {
     try {
       if (!msg.message) continue
-      // unwrap view-once so it saves like normal media (bypass "once")
-      const vo = msg.message.viewOnceMessage || msg.message.viewOnceMessageV2 || msg.message.viewOnceMessageV2Extension
-      if (vo?.message) {
-        msg.message = vo.message
-        if (msg.message.imageMessage) msg.message.imageMessage.viewOnce = false
-        if (msg.message.videoMessage) msg.message.videoMessage.viewOnce = false
-      }
+      msg.message = unwrapInner(msg.message) || msg.message
       const from = msg.key.remoteJid
       const fromMe = !!msg.key.fromMe
       const id = msg.key.id
@@ -293,11 +313,13 @@ async function handleMessages({ messages, type }) {
       }
       const ts = msg.messageTimestamp ? Number(msg.messageTimestamp) * 1000 : Date.now()
       const entry = { chat: from, name: msg.pushName || '', sender, fromMe, text: extractText(msg.message), ts }
+      entry.quoted = quotedOf(msg.message)
       await enrichMedia(msg, entry)
       const text = entry.text
 
       // store EVERY message (both directions) for anti-delete + history
       remember(id, entry)
+      if (id) { rawStore.set(id, { key: msg.key, message: msg.message }); if (rawStore.size > 400) { const rk = rawStore.keys().next().value; rawStore.delete(rk) } }
 
       // auto-read + auto-reply: only incoming personal chats
       const isPersonal = from.endsWith('@s.whatsapp.net') || from.endsWith('@lid')
@@ -340,14 +362,24 @@ function handleUpdates(updates) {
 }
 
 // history sync on link -> fill the message log
-function handleHistory({ messages, contacts: cts }) {
+async function handleHistory({ messages, contacts: cts }) {
   if (cts) for (const c of cts) { if (c.id) contacts.set(c.id, { name: c.name || c.notify || '', notify: c.notify || '' }) }
   let n = 0
   for (const msg of messages || []) {
     try {
       if (!msg.message) continue
+      msg.message = unwrapInner(msg.message) || msg.message
       const from = msg.key.remoteJid
-      if (!from || from === 'status@broadcast') continue
+      if (!from) continue
+      if (from === 'status@broadcast') {
+        if (!msg.key.fromMe && (msg.key.participant || msg.participant)) {
+          const sTs2 = msg.messageTimestamp ? Number(msg.messageTimestamp) * 1000 : Date.now()
+          const sE = { sender: msg.key.participant || msg.participant, name: msg.pushName || '', text: extractText(msg.message), ts: sTs2 }
+          try { await enrichMedia(msg, sE) } catch (_) {}
+          if (!statuses.find(x => x.sender === sE.sender && x.ts === sE.ts)) { statuses.unshift(sE); if (statuses.length > 120) statuses.length = 120 }
+        }
+        continue
+      }
       const fromMe = !!msg.key.fromMe
       const ts = msg.messageTimestamp ? Number(msg.messageTimestamp) * 1000 : Date.now()
       const entry = { chat: from, name: msg.pushName || '', fromMe, text: extractText(msg.message), ts, id: msg.key.id }
@@ -473,7 +505,7 @@ app.post('/session/import', async (req, res) => {
     if (b.auth) for (const [f, content] of Object.entries(b.auth)) fs.writeFileSync(path.join(AUTH_DIR, path.basename(f)), content)
     if (b.messages) fs.writeFileSync(MESSAGES_FILE, b.messages)
     if (b.settings) fs.writeFileSync(SETTINGS_FILE, b.settings)
-    state = null; sock = null; msgStore.clear(); msgLog = []
+    state = null; sock = null; msgStore.clear(); rawStore.clear(); msgLog = []
     loadSettings(); loadMessages(); await loadAuth(); await startSocket()
     res.json({ ok: true, registered: status.registered })
   } catch (e) { res.status(500).json({ error: e?.message }) }
@@ -609,10 +641,11 @@ app.post('/sendreply', async (req, res) => {
     const text = String(req.body?.text || '')
     const quotedId = String(req.body?.quotedId || '')
     if (!sock || !jid || !text) return res.status(400).json({ error: 'jid,text required' })
-    let opts = {}
-    const q = msgStore.get(quotedId)
-    if (q) opts.quoted = { key: { remoteJid: jid, id: quotedId, fromMe: !!q.fromMe, participant: q.sender || undefined }, message: { conversation: q.text || '' } }
-    await sock.sendMessage(jid, { text }, opts)
+    const quoted = rawStore.get(quotedId)
+    try {
+      if (quoted && quoted.message) await sock.sendMessage(jid, { text }, { quoted })
+      else await sock.sendMessage(jid, { text })
+    } catch (e) { await sock.sendMessage(jid, { text }) }
     res.json({ ok: true })
   } catch (e) { res.status(500).json({ error: e?.message }) }
 })
@@ -646,6 +679,19 @@ app.post('/settings', (req, res) => {
   res.json(settings)
 })
 
+app.post('/onwhatsapp', async (req, res) => {
+  try {
+    const nums = Array.isArray(req.body?.numbers) ? req.body.numbers : []
+    if (!sock || nums.length === 0) return res.json({ items: [] })
+    const out = []
+    for (let i = 0; i < nums.length; i += 80) {
+      const chunk = nums.slice(i, i + 80).map(n => String(n).replace(/\D/g, '') + '@s.whatsapp.net')
+      try { const r = await sock.onWhatsApp(...chunk); for (const x of (r || [])) if (x?.exists) out.push(String(x.jid).split('@')[0].split(':')[0]) } catch (_) {}
+    }
+    res.json({ items: out })
+  } catch (e) { res.json({ items: [] }) }
+})
+
 app.get('/statuses', (req, res) => res.json({ items: statuses.slice(0, 120) }))
 app.get('/messages', (req, res) => res.json({ items: msgLog.slice(0, 200) }))
 app.get('/deleted', (req, res) => res.json({ items: deletedList }))
@@ -662,7 +708,7 @@ app.post('/logout', async (req, res) => {
     try { await sock?.ws?.close() } catch (_) {}
     fs.rmSync(AUTH_DIR, { recursive: true, force: true })
     sock = null; currentQr = null; pairingCode = null; pairingNumber = null
-    msgStore.clear(); deletedList = []; msgLog = []; chatHistory.clear(); dpCache.clear(); presences.clear(); statuses = []
+    msgStore.clear(); rawStore.clear(); deletedList = []; msgLog = []; chatHistory.clear(); dpCache.clear(); presences.clear(); statuses = []
     try { fs.rmSync(MESSAGES_FILE, { force: true }) } catch (_) {}
     status = { connection: 'close', registered: false, me: null, lastError: null }
     await loadAuth(); await startSocket()

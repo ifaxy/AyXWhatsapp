@@ -37,7 +37,7 @@ object GatewayClient {
     )
     data class Contact(val jid: String, val name: String, val number: String)
     data class Msg(val chat: String, val name: String, val fromMe: Boolean, val text: String, val ts: Long,
-                   val mediaName: String? = null, val mediaType: String? = null, val thumb: String? = null, val deleted: Boolean = false, val id: String? = null, val reaction: String? = null, val sender: String? = null)
+                   val mediaName: String? = null, val mediaType: String? = null, val thumb: String? = null, val deleted: Boolean = false, val id: String? = null, val reaction: String? = null, val sender: String? = null, val quotedText: String? = null)
 
     suspend fun status(): Status = withContext(Dispatchers.IO) {
         try {
@@ -109,6 +109,21 @@ object GatewayClient {
     suspend fun react(jid: String, id: String, emoji: String, fromMe: Boolean) = withContext(Dispatchers.IO) {
         post("/react", JSONObject().put("jid", jid).put("id", id).put("emoji", emoji).put("fromMe", fromMe)).optBoolean("ok", false)
     }
+    suspend fun onWhatsApp(numbers: List<String>): Set<String> = withContext(Dispatchers.IO) {
+        try {
+            val arr = org.json.JSONArray(); numbers.forEach { arr.put(it) }
+            val body = JSONObject().put("numbers", arr).toString()
+            val c = (URL("$base/onwhatsapp").openConnection() as HttpURLConnection).apply {
+                requestMethod = "POST"; doOutput = true; connectTimeout = 4000; readTimeout = 90000
+                setRequestProperty("Content-Type", "application/json")
+            }
+            c.outputStream.use { it.write(body.toByteArray()) }
+            val txt = (if (c.responseCode in 200..299) c.inputStream else c.errorStream)?.bufferedReader()?.use { it.readText() } ?: "{}"
+            val items = JSONObject(txt).optJSONArray("items") ?: return@withContext emptySet()
+            (0 until items.length()).map { items.getString(it) }.toSet()
+        } catch (e: Exception) { emptySet() }
+    }
+
     suspend fun sendReply(jid: String, text: String, quotedId: String) = withContext(Dispatchers.IO) {
         post("/sendreply", JSONObject().put("jid", jid).put("text", text).put("quotedId", quotedId)).optBoolean("ok", false)
     }
@@ -253,6 +268,7 @@ object GatewayClient {
                     id = m.optString("id").ifEmpty { null },
                     reaction = m.optString("reaction").ifEmpty { null },
                     sender = m.optString("sender").ifEmpty { null },
+                    quotedText = m.optJSONObject("quoted")?.optString("text")?.ifEmpty { null },
                 ))
             }
         }
