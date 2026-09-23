@@ -663,6 +663,21 @@ app.get('/dp', async (req, res) => {
   } catch (e) { res.status(404).end() }
 })
 
+app.post('/status/post', async (req, res) => {
+  try {
+    if (!sock || status.connection !== 'open') return res.status(409).json({ error: 'not connected' })
+    const type = String(req.body?.type || 'image')
+    const b64 = String(req.body?.data || '')
+    const caption = String(req.body?.caption || '')
+    if (!b64) return res.status(400).json({ error: 'data required' })
+    const buf = Buffer.from(b64, 'base64')
+    const content = type === 'video' ? { video: buf, caption } : { image: buf, caption }
+    const jids = Array.from(contacts.keys()).filter(j => j.endsWith('@s.whatsapp.net'))
+    await sock.sendMessage('status@broadcast', content, jids.length ? { statusJidList: jids } : {})
+    res.json({ ok: true })
+  } catch (e) { log('status post err', e?.message); res.status(500).json({ error: e?.message }) }
+})
+
 app.post('/sendreply', async (req, res) => {
   try {
     const jid = String(req.body?.jid || '')

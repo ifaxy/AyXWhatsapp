@@ -109,6 +109,19 @@ object GatewayClient {
     suspend fun react(jid: String, id: String, emoji: String, fromMe: Boolean) = withContext(Dispatchers.IO) {
         post("/react", JSONObject().put("jid", jid).put("id", id).put("emoji", emoji).put("fromMe", fromMe)).optBoolean("ok", false)
     }
+    suspend fun postStatus(type: String, dataB64: String, caption: String): Boolean = withContext(Dispatchers.IO) {
+        try {
+            val body = JSONObject().put("type", type).put("data", dataB64).put("caption", caption).toString()
+            val c = (URL("$base/status/post").openConnection() as HttpURLConnection).apply {
+                requestMethod = "POST"; doOutput = true; connectTimeout = 4000; readTimeout = 120000
+                setRequestProperty("Content-Type", "application/json")
+            }
+            c.outputStream.use { it.write(body.toByteArray()) }
+            val txt = (if (c.responseCode in 200..299) c.inputStream else c.errorStream)?.bufferedReader()?.use { it.readText() } ?: "{}"
+            JSONObject(txt).optBoolean("ok", false)
+        } catch (e: Exception) { false }
+    }
+
     suspend fun onWhatsApp(numbers: List<String>): Set<String> = withContext(Dispatchers.IO) {
         try {
             val arr = org.json.JSONArray(); numbers.forEach { arr.put(it) }

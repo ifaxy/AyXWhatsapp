@@ -142,6 +142,14 @@ class MainActivity : ComponentActivity() {
         ) notifPermission.launch(Manifest.permission.POST_NOTIFICATIONS)
 
         intent?.getStringExtra("openChat")?.let { AppNav.pendingOpenChat.value = it }
+        intent?.data?.let { uri ->
+            val host = uri.host ?: ""
+            val num = when {
+                host.contains("wa.me") -> uri.pathSegments.firstOrNull()?.filter { it.isDigit() }
+                else -> uri.getQueryParameter("phone")?.filter { it.isDigit() }
+            }
+            if (!num.isNullOrBlank()) AppNav.pendingOpenChat.value = num + "@s.whatsapp.net"
+        }
 
         setContent {
             val dark = isSystemInDarkTheme()
@@ -169,10 +177,25 @@ class MainActivity : ComponentActivity() {
 private val timeFmt = SimpleDateFormat("h:mm a", Locale.getDefault())
 private fun fmt(ts: Long) = if (ts > 0) timeFmt.format(Date(ts)).lowercase(Locale.getDefault()) else ""
 
+object ContactNames {
+    val map = mutableMapOf<String, String>()  // number(digits) -> display name
+    fun nameFor(jid: String): String? {
+        val num = jid.substringBefore("@").filter { it.isDigit() }
+        if (num.isBlank()) return null
+        map[num]?.let { return it }
+        if (num.length >= 10) { val l10 = num.takeLast(10); map.entries.firstOrNull { it.key.takeLast(10) == l10 }?.let { return it.value } }
+        return null
+    }
+}
+
 private fun chatTitle(msgs: List<GatewayClient.Msg>): String {
-    msgs.firstOrNull { !it.fromMe && it.name.isNotBlank() }?.let { return it.name }
     val chat = msgs.firstOrNull()?.chat ?: return "Unknown"
-    return if (chat.endsWith("@s.whatsapp.net")) "+" + chat.substringBefore("@") else "Unknown contact"
+    ContactNames.nameFor(chat)?.let { if (it.isNotBlank()) return it }
+    msgs.firstOrNull { !it.fromMe && it.name.isNotBlank() }?.let { return it.name }
+    return when {
+        chat.endsWith("@g.us") -> "Group"
+        else -> { val n = chat.substringBefore("@").filter { it.isDigit() }; if (n.isNotBlank()) "+" + n else "Unknown" }
+    }
 }
 
 private fun decodeThumb(b64: String?): ImageBitmap? = b64?.let {
@@ -333,6 +356,19 @@ fun GatewayApp() {
 
     // file picker for sending media
     var pendingMedia by remember { mutableStateOf<Pair<Uri, String>?>(null) }
+    var chatsPage by remember { mutableStateOf(0) }
+    val statusPicker = rememberLauncherForActivityResult(ActivityResultContracts.GetContent()) { uri: Uri? ->
+        if (uri != null) {
+            val mime = ctx.contentResolver.getType(uri) ?: ""
+            val type = if (mime.startsWith("video")) "video" else "image"
+            scope.launch {
+                try {
+                    val bytes = withContext(Dispatchers.IO) { ctx.contentResolver.openInputStream(uri)?.use { it.readBytes() } }
+                    if (bytes != null) { notify("uploading status…"); val ok = GatewayClient.postStatus(type, Base64.encodeToString(bytes, Base64.NO_WRAP), ""); notify(if (ok) "status uploaded" else "upload failed") }
+                } catch (e: Exception) { notify("upload failed: " + e.message) }
+            }
+        }
+    }
     val picker = rememberLauncherForActivityResult(ActivityResultContracts.GetContent()) { uri: Uri? ->
         if (uri != null && openChat != null) {
             val mime = ctx.contentResolver.getType(uri) ?: "application/octet-stream"
@@ -378,6 +414,7 @@ fun GatewayApp() {
         contactsLoading = true
         scope.launch {
             val all = withContext(Dispatchers.IO) { loadDeviceContacts(ctx) }
+            ContactNames.map.clear(); all.forEach { ContactNames.map[it.number] = it.name }
             val reg = GatewayClient.onWhatsApp(all.map { it.number })
             deviceContacts = if (reg.isEmpty()) all else all.filter { it.number in reg }
             contactsLoading = false
@@ -450,6 +487,12 @@ fun GatewayApp() {
     }
 
     LaunchedEffect(Unit) { NodeService.start(ctx) }
+    LaunchedEffect(Unit) {
+        if (ContextCompat.checkSelfPermission(ctx, Manifest.permission.READ_CONTACTS) == PackageManager.PERMISSION_GRANTED) {
+            val all = withContext(Dispatchers.IO) { loadDeviceContacts(ctx) }
+            ContactNames.map.clear(); all.forEach { ContactNames.map[it.number] = it.name }
+        }
+    }
     LaunchedEffect(Unit) {
         while (true) {
             status = GatewayClient.status()
@@ -592,20 +635,26 @@ fun GatewayApp() {
 
     Scaffold(
         floatingActionButton = {
-            if (status.registered && openChat == null && screen == "chats")
-                FloatingActionButton(onClick = { screen = "newchat"; ensureContacts() }) { Icon(Icons.Filled.Add, "new chat") }
+            if (status.registered && openChat == null && screen == "chats") {
+                if (chatsPage == 1) FloatingActionButton(onClick = { statusPicker.launch("*/*") }) { Icon(Icons.Filled.PhotoCamera, "add status") }
+                else FloatingActionButton(onClick = { screen = "newchat"; ensureContacts() }) { Icon(Icons.Filled.Add, "new chat") }
+            }
         },
         topBar = {
             TopAppBar(
                 title = {
                     if (searchMode && openChat == null && screen == "chats") {
-                        OutlinedTextField(searchQuery, { searchQuery = it }, placeholder = { Text("Search chats") }, singleLine = true, modifier = Modifier.fillMaxWidth())
+                        OutlinedTextField(searchQuery, { searchQuery = it }, placeholder = { Text("Search chats") },
+                            leadingIcon = { Icon(Icons.Filled.Search, null, tint = IOS_BLUE) }, singleLine = true, shape = RoundedCornerShape(24.dp),
+                            colors = OutlinedTextFieldDefaults.colors(focusedBorderColor = Color.Transparent, unfocusedBorderColor = Color.Transparent,
+                                focusedContainerColor = MaterialTheme.colorScheme.surfaceVariant, unfocusedContainerColor = MaterialTheme.colorScheme.surfaceVariant),
+                            modifier = Modifier.fillMaxWidth())
                     } else if (openChat != null) {
-                        Row(verticalAlignment = Alignment.CenterVertically) {
-                            Avatar(openChat!!, chatName ?: "?", dpCache, 42.dp, RoundedCornerShape(13.dp))
-                            Spacer(Modifier.width(12.dp))
-                            Column {
-                                Text(title, maxLines = 1, fontWeight = FontWeight.Bold, style = MaterialTheme.typography.titleMedium, modifier = Modifier.widthIn(max = 210.dp).basicMarquee())
+                        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.Center) {
+                            Avatar(openChat!!, chatName ?: "?", dpCache, 40.dp, CircleShape)
+                            Spacer(Modifier.width(10.dp))
+                            Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                                Text(title, maxLines = 1, fontWeight = FontWeight.Bold, style = MaterialTheme.typography.titleMedium, modifier = Modifier.widthIn(max = 190.dp).basicMarquee())
                                 val sub = chatPresence?.let { pr -> if (pr.online) "online" else if (pr.lastSeen > 0) "last seen " + fmt(pr.lastSeen * 1000) else "" } ?: ""
                                 if (sub.isNotEmpty()) Text(sub, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                             }
@@ -690,6 +739,7 @@ fun GatewayApp() {
                 screen == "newchat" -> NewChatScreen(deviceContacts, contactsLoading, dpCache,
                     onPickNumber = { num -> openChat = num + "@s.whatsapp.net"; screen = "chats" })
                 else -> ChatsWithStatus(messages, statuses, dpCache, searchQuery,
+                    onPageChange = { chatsPage = it },
                     onLoadStatuses = { scope.launch { statuses = GatewayClient.getStatuses() } },
                     onOpenStatus = { st ->
                         val nm = st.mediaName
@@ -743,7 +793,7 @@ private fun ChatList(messages: List<GatewayClient.Msg>, dpCache: MutableMap<Stri
             val name = chatTitle(msgs)
           Box {
             var menu by remember { mutableStateOf(false) }
-            Row(Modifier.fillMaxWidth().combinedClickable(onClick = { onOpen(entry.key) }, onLongClick = { menu = true }).padding(horizontal = 14.dp, vertical = 12.dp),
+            Row(Modifier.fillMaxWidth().combinedClickable(interactionSource = remember { MutableInteractionSource() }, indication = null, onClick = { onOpen(entry.key) }, onLongClick = { menu = true }).padding(horizontal = 14.dp, vertical = 12.dp),
                 verticalAlignment = Alignment.CenterVertically) {
                 Avatar(entry.key, name, dpCache, 50.dp)
                 Spacer(Modifier.width(12.dp))
@@ -1172,10 +1222,11 @@ private fun NewChatScreen(contacts: List<DeviceContact>, loading: Boolean, dpCac
 
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
-private fun ChatsWithStatus(messages: List<GatewayClient.Msg>, statuses: List<GatewayClient.StatusItem>, dpCache: MutableMap<String, ImageBitmap?>, query: String, onLoadStatuses: () -> Unit, onOpenStatus: (GatewayClient.StatusItem) -> Unit, onDelete: (String) -> Unit, onOpen: (String) -> Unit) {
+private fun ChatsWithStatus(messages: List<GatewayClient.Msg>, statuses: List<GatewayClient.StatusItem>, dpCache: MutableMap<String, ImageBitmap?>, query: String, onPageChange: (Int) -> Unit, onLoadStatuses: () -> Unit, onOpenStatus: (GatewayClient.StatusItem) -> Unit, onDelete: (String) -> Unit, onOpen: (String) -> Unit) {
     val pager = rememberPagerState(initialPage = 0) { 2 }
     val cs = rememberCoroutineScope()
     LaunchedEffect(pager.currentPage) {
+        onPageChange(pager.currentPage)
         while (pager.currentPage == 1) { onLoadStatuses(); delay(5000) }
     }
     Column(Modifier.fillMaxSize()) {
