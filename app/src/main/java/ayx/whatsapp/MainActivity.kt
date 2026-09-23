@@ -552,6 +552,7 @@ fun GatewayApp() {
     storyView?.let { sender ->
         StatusViewer(statuses, sender, dpCache,
             onDownload = { st -> downloadMedia(scope, ctx, GatewayClient.Msg(st.sender, "", false, st.text, st.ts, st.mediaName, st.mediaType)) { m -> notify(m) } },
+            onReply = { jid, text -> scope.launch { runCatching { GatewayClient.sendToJid(jid, text) }.onSuccess { notify("reply sent") }.onFailure { notify("reply failed: " + it.message) } } },
             onClose = { storyView = null })
     }
 
@@ -1370,6 +1371,11 @@ private fun StatusEditor(uri: Uri, type: String, contacts: List<DeviceContact>, 
     var audience by remember { mutableStateOf("all") }
     var selected by remember { mutableStateOf(setOf<String>()) }
     var pickAudience by remember { mutableStateOf(false) }
+    var song by remember { mutableStateOf<GatewayClient.Song?>(null) }
+    var musicOpen by remember { mutableStateOf(false) }
+    val player = remember { MediaPlayer() }
+    var playing by remember { mutableStateOf(false) }
+    DisposableEffect(Unit) { onDispose { runCatching { player.release() } } }
     val audLabel = when (audience) { "except" -> "Except " + selected.size; "only" -> "Only " + selected.size; else -> "My contacts" }
     Dialog(onDismissRequest = onCancel, properties = DialogProperties(usePlatformDefaultWidth = false)) {
         Surface(Modifier.fillMaxSize(), color = Color.Black) {
@@ -1385,7 +1391,26 @@ private fun StatusEditor(uri: Uri, type: String, contacts: List<DeviceContact>, 
                         if (bmp != null) Image(bmp, null, Modifier.fillMaxSize(), contentScale = ContentScale.Crop) else Text("Preview unavailable", color = Color.White)
                     } else Text("Video selected", color = Color.White)
                 }
-                Row(Modifier.fillMaxWidth().padding(top = 8.dp), verticalAlignment = Alignment.CenterVertically) {
+                Row(Modifier.fillMaxWidth().padding(top = 6.dp), verticalAlignment = Alignment.CenterVertically) {
+                    val sg = song
+                    if (sg == null) {
+                        TextButton(onClick = { musicOpen = true }) { Text("♪  Add music", color = IOS_BLUE) }
+                    } else {
+                        TextButton(onClick = {
+                            if (playing) { runCatching { player.pause() }; playing = false }
+                            else runCatching {
+                                player.reset(); player.setDataSource(sg.url)
+                                player.setOnPreparedListener { it.start(); playing = true }
+                                player.setOnCompletionListener { playing = false }
+                                player.setOnErrorListener { _, _, _ -> playing = false; true }
+                                player.prepareAsync()
+                            }
+                        }) { Text(if (playing) "⏸ Pause" else "▶ Play", color = IOS_BLUE) }
+                        Text("♪ " + sg.title, color = Color.White, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f))
+                        IconButton(onClick = { runCatching { player.reset() }; playing = false; song = null }) { Icon(Icons.Filled.Close, "remove", tint = Color.White) }
+                    }
+                }
+                Row(Modifier.fillMaxWidth().padding(top = 4.dp), verticalAlignment = Alignment.CenterVertically) {
                     OutlinedTextField(caption, { caption = it }, placeholder = { Text("Add a caption…", color = Color.White.copy(alpha = 0.6f)) }, singleLine = true, shape = RoundedCornerShape(26.dp),
                         colors = OutlinedTextFieldDefaults.colors(focusedBorderColor = Color.Transparent, unfocusedBorderColor = Color.Transparent,
                             focusedContainerColor = Color.White.copy(alpha = 0.14f), unfocusedContainerColor = Color.White.copy(alpha = 0.14f),
@@ -1398,6 +1423,7 @@ private fun StatusEditor(uri: Uri, type: String, contacts: List<DeviceContact>, 
         }
     }
     if (pickAudience) AudienceSheet(contacts, audience, selected) { a, sset -> audience = a; selected = sset; pickAudience = false }
+    if (musicOpen) MusicSearchSheet(onPick = { song = it; musicOpen = false }, onClose = { musicOpen = false })
 }
 
 @Composable
@@ -1444,7 +1470,7 @@ private fun AudRadio(label: String, selected: Boolean, onClick: () -> Unit) {
 
 
 @Composable
-private fun StatusViewer(statuses: List<GatewayClient.StatusItem>, startSender: String, dpCache: MutableMap<String, ImageBitmap?>, onDownload: (GatewayClient.StatusItem) -> Unit, onClose: () -> Unit) {
+private fun StatusViewer(statuses: List<GatewayClient.StatusItem>, startSender: String, dpCache: MutableMap<String, ImageBitmap?>, onDownload: (GatewayClient.StatusItem) -> Unit, onReply: (String, String) -> Unit, onClose: () -> Unit) {
     val groups = remember(statuses) {
         statuses.groupBy { it.sender }.entries
             .sortedWith(compareByDescending<Map.Entry<String, List<GatewayClient.StatusItem>>> { e -> e.value.any { it.mine } }.thenByDescending { e -> e.value.maxOf { it.ts } })
@@ -1459,6 +1485,7 @@ private fun StatusViewer(statuses: List<GatewayClient.StatusItem>, startSender: 
     val st = items.getOrNull(ii) ?: run { LaunchedEffect(Unit) { onClose() }; return }
     fun goNext() { if (ii < items.size - 1) ii++ else if (si < groups.size - 1) { si++; ii = 0 } else onClose() }
     fun goPrev() { if (ii > 0) ii-- else if (si > 0) { si--; ii = 0 } }
+    var replyText by remember { mutableStateOf("") }
 
     var bmp by remember(st.mediaName, si, ii) { mutableStateOf<ImageBitmap?>(null) }
     LaunchedEffect(st.mediaName, si, ii) {
@@ -1469,7 +1496,7 @@ private fun StatusViewer(statuses: List<GatewayClient.StatusItem>, startSender: 
             bmp = bytes?.let { BitmapFactory.decodeByteArray(it, 0, it.size)?.asImageBitmap() } ?: decodeThumb(st.thumb)
         }
     }
-    LaunchedEffect(si, ii) { if (st.mediaType != "video") { delay(5000); goNext() } }
+    LaunchedEffect(si, ii, replyText.isBlank()) { if (st.mediaType != "video" && replyText.isBlank()) { delay(5000); goNext() } }
 
     Dialog(onDismissRequest = onClose, properties = DialogProperties(usePlatformDefaultWidth = false)) {
         Surface(Modifier.fillMaxSize(), color = Color.Black) {
@@ -1505,6 +1532,17 @@ private fun StatusViewer(statuses: List<GatewayClient.StatusItem>, startSender: 
                         IconButton(onClick = onClose) { Icon(Icons.Filled.Close, "close", tint = Color.White) }
                     }
                 }
+                if (!items.first().mine) {
+                    Row(Modifier.align(Alignment.BottomCenter).fillMaxWidth().navigationBarsPadding().imePadding().padding(10.dp), verticalAlignment = Alignment.CenterVertically) {
+                        OutlinedTextField(replyText, { replyText = it }, placeholder = { Text("Reply to status…", color = Color.White.copy(alpha = 0.6f)) }, singleLine = true, shape = RoundedCornerShape(26.dp),
+                            colors = OutlinedTextFieldDefaults.colors(focusedBorderColor = Color.White.copy(alpha = 0.4f), unfocusedBorderColor = Color.White.copy(alpha = 0.25f),
+                                focusedContainerColor = Color.Black.copy(alpha = 0.4f), unfocusedContainerColor = Color.Black.copy(alpha = 0.4f),
+                                focusedTextColor = Color.White, unfocusedTextColor = Color.White, cursorColor = Color.White),
+                            modifier = Modifier.weight(1f))
+                        Spacer(Modifier.width(8.dp))
+                        FilledIconButton(onClick = { if (replyText.isNotBlank()) { onReply(group.first, replyText.trim()); replyText = "" } }, enabled = replyText.isNotBlank()) { Icon(Icons.AutoMirrored.Filled.Send, "send") }
+                    }
+                }
             }
         }
     }
@@ -1525,5 +1563,39 @@ private fun ProfileScreen(myJid: String?, dpCache: MutableMap<String, ImageBitma
         OutlinedTextField(name, { name = it }, label = { Text("Your name") }, singleLine = true, modifier = Modifier.fillMaxWidth())
         Spacer(Modifier.height(14.dp))
         Button(onClick = { if (name.isNotBlank()) onSaveName(name.trim()) }, enabled = name.isNotBlank(), modifier = Modifier.fillMaxWidth()) { Text("Save name") }
+    }
+}
+
+
+@Composable
+private fun MusicSearchSheet(onPick: (GatewayClient.Song) -> Unit, onClose: () -> Unit) {
+    var q by remember { mutableStateOf("") }
+    var results by remember { mutableStateOf<List<GatewayClient.Song>>(emptyList()) }
+    var loading by remember { mutableStateOf(false) }
+    LaunchedEffect(q) {
+        if (q.trim().length >= 2) { loading = true; delay(450); results = GatewayClient.searchMusic(q.trim()); loading = false } else results = emptyList()
+    }
+    Dialog(onDismissRequest = onClose) {
+        Surface(shape = RoundedCornerShape(16.dp)) {
+            Column(Modifier.padding(12.dp).heightIn(max = 520.dp)) {
+                Text("Add music", fontWeight = FontWeight.Bold)
+                Spacer(Modifier.height(8.dp))
+                OutlinedTextField(q, { q = it }, placeholder = { Text("Search songs…") }, leadingIcon = { Icon(Icons.Filled.Search, null) }, singleLine = true, modifier = Modifier.fillMaxWidth())
+                if (loading) LinearProgressIndicator(Modifier.fillMaxWidth().padding(top = 6.dp))
+                Spacer(Modifier.height(6.dp))
+                LazyColumn(Modifier.fillMaxWidth()) {
+                    itemsIndexed(results) { _, sg ->
+                        Row(Modifier.fillMaxWidth().clickable { onPick(sg) }.padding(vertical = 9.dp), verticalAlignment = Alignment.CenterVertically) {
+                            Icon(Icons.Filled.PlayArrow, null, tint = IOS_BLUE)
+                            Spacer(Modifier.width(10.dp))
+                            Column {
+                                Text(sg.title, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                                Text(sg.artist, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                            }
+                        }
+                    }
+                }
+            }
+        }
     }
 }

@@ -3,6 +3,7 @@
 
 const fs = require('fs')
 const path = require('path')
+const crypto = require('crypto')
 const express = require('express')
 const pino = require('pino')
 const QRCode = require('qrcode')
@@ -692,6 +693,43 @@ app.get('/dp', async (req, res) => {
     res.setHeader('Cache-Control', 'max-age=3600')
     res.send(buf)
   } catch (e) { res.status(404).end() }
+})
+
+function saavnDecrypt(encUrl) {
+  try {
+    const key = Buffer.from('38346591', 'utf8')
+    const encrypted = Buffer.from(encUrl, 'base64')
+    const decipher = crypto.createDecipheriv('des-ecb', key, null)
+    decipher.setAutoPadding(true)
+    let out = decipher.update(encrypted, undefined, 'utf8') + decipher.final('utf8')
+    return out.replace('_96.mp4', '_320.mp4')
+  } catch (e) { return null }
+}
+function deEnt(str) {
+  return String(str || '').replace(/&amp;/g, '&').replace(/&quot;/g, '"').replace(/&#039;/g, "'").replace(/&lt;/g, '<').replace(/&gt;/g, '>')
+}
+app.get('/music/search', async (req, res) => {
+  try {
+    const q = String(req.query.q || '').trim()
+    if (!q) return res.json({ items: [] })
+    const url = 'https://www.jiosaavn.com/api.php?p=1&q=' + encodeURIComponent(q) + '&_format=json&_marker=0&api_version=4&ctx=web6dot0&n=25&__call=search.getResults'
+    const r = await fetch(url, { headers: { 'User-Agent': 'Mozilla/5.0', 'Accept': 'application/json' } })
+    const data = await r.json()
+    const results = data && data.results ? data.results : []
+    const items = []
+    for (const it of results) {
+      const mi = it.more_info || {}
+      const enc = mi.encrypted_media_url || it.encrypted_media_url
+      if (!enc) continue
+      const audio = saavnDecrypt(enc)
+      if (!audio) continue
+      let artist = ''
+      try { artist = (mi.artistMap && mi.artistMap.primary_artists ? mi.artistMap.primary_artists.map(a => a.name).join(', ') : '') || it.primary_artists || it.subtitle || '' } catch (_) {}
+      const image = String(it.image || '').replace('150x150', '500x500')
+      items.push({ title: deEnt(it.title || it.song || ''), artist: deEnt(artist), image, url: audio })
+    }
+    res.json({ items: items.slice(0, 25) })
+  } catch (e) { log('saavn err', e && e.message); res.json({ items: [] }) }
 })
 
 app.post('/status/post', async (req, res) => {
