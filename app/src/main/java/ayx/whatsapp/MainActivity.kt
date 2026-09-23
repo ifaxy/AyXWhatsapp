@@ -60,6 +60,7 @@ import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Download
+import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.ExpandLess
 import androidx.compose.material.icons.filled.ExpandMore
 import androidx.compose.material.icons.filled.Share
@@ -553,6 +554,7 @@ fun GatewayApp() {
         StatusViewer(statuses, sender, dpCache,
             onDownload = { st -> downloadMedia(scope, ctx, GatewayClient.Msg(st.sender, "", false, st.text, st.ts, st.mediaName, st.mediaType)) { m -> notify(m) } },
             onReply = { jid, text -> scope.launch { runCatching { GatewayClient.sendToJid(jid, text) }.onSuccess { notify("reply sent") }.onFailure { notify("reply failed: " + it.message) } } },
+            onDeleteStatus = { id -> scope.launch { runCatching { GatewayClient.deleteStatus(id) }.onSuccess { notify("status deleted"); statuses = GatewayClient.getStatuses() }.onFailure { notify("delete failed") } } },
             onClose = { storyView = null })
     }
 
@@ -1470,7 +1472,7 @@ private fun AudRadio(label: String, selected: Boolean, onClick: () -> Unit) {
 
 
 @Composable
-private fun StatusViewer(statuses: List<GatewayClient.StatusItem>, startSender: String, dpCache: MutableMap<String, ImageBitmap?>, onDownload: (GatewayClient.StatusItem) -> Unit, onReply: (String, String) -> Unit, onClose: () -> Unit) {
+private fun StatusViewer(statuses: List<GatewayClient.StatusItem>, startSender: String, dpCache: MutableMap<String, ImageBitmap?>, onDownload: (GatewayClient.StatusItem) -> Unit, onDeleteStatus: (String) -> Unit, onReply: (String, String) -> Unit, onClose: () -> Unit) {
     val groups = remember(statuses) {
         statuses.groupBy { it.sender }.entries
             .sortedWith(compareByDescending<Map.Entry<String, List<GatewayClient.StatusItem>>> { e -> e.value.any { it.mine } }.thenByDescending { e -> e.value.maxOf { it.ts } })
@@ -1539,6 +1541,7 @@ private fun StatusViewer(statuses: List<GatewayClient.StatusItem>, startSender: 
                         Avatar(group.first, group.first.substringBefore("@"), dpCache, 36.dp)
                         Spacer(Modifier.width(10.dp))
                         Text(if (items.first().mine) "My Status" else (ContactStore.nameFor(group.first) ?: items.first().name.ifBlank { "Status" }), color = Color.White, fontWeight = FontWeight.Bold, maxLines = 1, modifier = Modifier.weight(1f))
+                        if (items.first().mine && st.id != null) IconButton(onClick = { onDeleteStatus(st.id!!); onClose() }) { Icon(Icons.Filled.Delete, "delete", tint = Color.White) }
                         if (st.mediaName != null) IconButton(onClick = { onDownload(st) }) { Icon(Icons.Filled.Download, "download", tint = Color.White) }
                         IconButton(onClick = onClose) { Icon(Icons.Filled.Close, "close", tint = Color.White) }
                     }

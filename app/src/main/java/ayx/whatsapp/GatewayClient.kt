@@ -217,7 +217,10 @@ object GatewayClient {
     }
 
     data class StatusItem(val sender: String, val name: String, val text: String,
-        val mediaName: String? = null, val mediaType: String? = null, val thumb: String? = null, val ts: Long = 0L, val mine: Boolean = false)
+        val mediaName: String? = null, val mediaType: String? = null, val thumb: String? = null, val ts: Long = 0L, val mine: Boolean = false, val id: String? = null)
+    suspend fun deleteStatus(id: String): Boolean = withContext(Dispatchers.IO) {
+        post("/status/delete", JSONObject().put("id", id)).optBoolean("ok", false)
+    }
     suspend fun getMe(): String = withContext(Dispatchers.IO) {
         try { get("/me").optString("jid") } catch (e: Exception) { "" }
     }
@@ -236,6 +239,7 @@ object GatewayClient {
                     thumb = md?.optString("thumb")?.ifEmpty { null },
                     ts = o.optLong("ts", 0L),
                     mine = o.optBoolean("mine", false),
+                    id = o.optString("id").ifEmpty { null },
                 )
             }
         } catch (e: Exception) { emptyList() }

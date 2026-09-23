@@ -357,7 +357,7 @@ async function handleMessages({ messages, type }) {
         const sndr = fromMe ? ((sock && sock.user && sock.user.id) || 'me') : (msg.key.participant || msg.participant)
         if (sndr) {
           const sTs = msg.messageTimestamp ? Number(msg.messageTimestamp) * 1000 : Date.now()
-          const sEntry = { sender: sndr, name: fromMe ? 'My Status' : (msg.pushName || ''), mine: fromMe, text: extractText(msg.message), ts: sTs }
+          const sEntry = { sender: sndr, name: fromMe ? 'My Status' : (msg.pushName || ''), mine: fromMe, id: msg.key.id, text: extractText(msg.message), ts: sTs }
           try { await enrichMedia(msg, sEntry) } catch (_) {}
           statuses.unshift(sEntry)
           if (statuses.length > 120) statuses.length = 120
@@ -790,7 +790,7 @@ app.post('/status/post', async (req, res) => {
     if (audience === 'only') jids = selJids
     else if (audience === 'except') jids = all.filter(j => !selJids.includes(j))
     else jids = all
-    const r = await sock.sendMessage('status@broadcast', content, { statusJidList: jids, broadcast: true })
+    const r = await sock.sendMessage('status@broadcast', content, { statusJidList: jids, backgroundColor: '#000000' })
     log('status posted id=' + (r && r.key && r.key.id) + ' recipients=' + jids.length)
     res.json({ ok: true, id: (r && r.key && r.key.id) || null, recipients: jids.length })
   } catch (e) { log('status post err', e?.message); res.status(500).json({ error: e?.message }) }
@@ -861,6 +861,17 @@ app.post('/onwhatsapp', async (req, res) => {
     }
     res.json({ items: out })
   } catch (e) { res.json({ items: [] }) }
+})
+
+app.post('/status/delete', async (req, res) => {
+  try {
+    if (!sock) return res.status(409).json({ error: 'not connected' })
+    const id = String(req.body?.id || '')
+    if (!id) return res.status(400).json({ error: 'id required' })
+    await sock.sendMessage('status@broadcast', { delete: { remoteJid: 'status@broadcast', id, fromMe: true } })
+    statuses = statuses.filter(x => x.id !== id)
+    res.json({ ok: true })
+  } catch (e) { res.status(500).json({ error: e && e.message }) }
 })
 
 app.get('/me', (req, res) => {
