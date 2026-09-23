@@ -26,6 +26,12 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
+import androidx.compose.foundation.gestures.detectHorizontalDragGestures
+import androidx.compose.foundation.pager.HorizontalPager
+import androidx.compose.foundation.pager.rememberPagerState
+import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.geometry.Offset
+import android.provider.ContactsContract
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.layout.*
@@ -41,6 +47,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.filled.Send
 import androidx.compose.material.icons.filled.AttachFile
+import androidx.compose.material.icons.filled.PhotoCamera
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Search
@@ -208,6 +215,39 @@ private fun shareMedia(scope: CoroutineScope, ctx: Context, m: GatewayClient.Msg
     }
 }
 
+data class DeviceContact(val name: String, val number: String)
+
+private fun normNumber(raw: String): String {
+    var d = raw.filter { it.isDigit() }
+    if (d.length == 11 && d.startsWith("0")) d = "91" + d.substring(1)
+    else if (d.length == 10) d = "91" + d
+    return d
+}
+
+private fun loadDeviceContacts(ctx: Context): List<DeviceContact> {
+    val out = ArrayList<DeviceContact>()
+    val seen = HashSet<String>()
+    try {
+        val cur = ctx.contentResolver.query(
+            ContactsContract.CommonDataKinds.Phone.CONTENT_URI,
+            arrayOf(ContactsContract.CommonDataKinds.Phone.DISPLAY_NAME, ContactsContract.CommonDataKinds.Phone.NUMBER),
+            null, null, ContactsContract.CommonDataKinds.Phone.DISPLAY_NAME + " ASC"
+        )
+        cur?.use { c ->
+            val ni = c.getColumnIndex(ContactsContract.CommonDataKinds.Phone.DISPLAY_NAME)
+            val pi = c.getColumnIndex(ContactsContract.CommonDataKinds.Phone.NUMBER)
+            while (c.moveToNext()) {
+                val name = if (ni >= 0) (c.getString(ni) ?: "") else ""
+                val raw = if (pi >= 0) (c.getString(pi) ?: "") else ""
+                val num = normNumber(raw)
+                if (num.length < 10) continue
+                if (seen.add(num)) out.add(DeviceContact(name.ifBlank { num }, num))
+            }
+        }
+    } catch (_: Exception) {}
+    return out
+}
+
 private fun queryName(ctx: Context, uri: Uri): String? =
     runCatching {
         ctx.contentResolver.query(uri, null, null, null, null)?.use { c ->
@@ -294,6 +334,41 @@ fun GatewayApp() {
         wallpaper = if (f.exists()) runCatching { BitmapFactory.decodeFile(f.absolutePath)?.asImageBitmap() }.getOrNull() else null
     }
     LaunchedEffect(Unit) { loadWallpaper() }
+    var cameraUri by remember { mutableStateOf<Uri?>(null) }
+    val cameraLauncher = rememberLauncherForActivityResult(ActivityResultContracts.TakePicture()) { ok ->
+        val jid = openChat; val u = cameraUri
+        if (ok && u != null && jid != null) scope.launch {
+            try {
+                val bytes = withContext(Dispatchers.IO) { ctx.contentResolver.openInputStream(u)?.use { it.readBytes() } }
+                if (bytes != null) { notify("sending photo…"); GatewayClient.sendMedia(jid, Base64.encodeToString(bytes, Base64.NO_WRAP), "image", "camera.jpg", "") }
+            } catch (e: Exception) { notify("send failed: ${e.message}") }
+        }
+    }
+    val cameraPerm = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
+        if (granted) cameraUri?.let { cameraLauncher.launch(it) } else notify("camera permission needed")
+    }
+    fun openCamera() {
+        val f = File(ctx.cacheDir, "cam_" + System.currentTimeMillis() + ".jpg")
+        val u = FileProvider.getUriForFile(ctx, ctx.packageName + ".fileprovider", f)
+        cameraUri = u
+        if (ContextCompat.checkSelfPermission(ctx, Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED) cameraLauncher.launch(u)
+        else cameraPerm.launch(Manifest.permission.CAMERA)
+    }
+
+    var deviceContacts by remember { mutableStateOf<List<DeviceContact>>(emptyList()) }
+    val contactsPerm = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
+        if (granted) scope.launch { deviceContacts = withContext(Dispatchers.IO) { loadDeviceContacts(ctx) } }
+        else notify("contacts permission needed")
+    }
+    fun ensureContacts() {
+        if (deviceContacts.isNotEmpty()) return
+        if (ContextCompat.checkSelfPermission(ctx, Manifest.permission.READ_CONTACTS) == PackageManager.PERMISSION_GRANTED)
+            scope.launch { deviceContacts = withContext(Dispatchers.IO) { loadDeviceContacts(ctx) } }
+        else contactsPerm.launch(Manifest.permission.READ_CONTACTS)
+    }
+
+    var statuses by remember { mutableStateOf<List<GatewayClient.StatusItem>>(emptyList()) }
+
     val wallpaperPicker = rememberLauncherForActivityResult(ActivityResultContracts.GetContent()) { uri: Uri? ->
         if (uri != null) scope.launch {
             withContext(Dispatchers.IO) {
@@ -382,7 +457,7 @@ fun GatewayApp() {
     }
     LaunchedEffect(toast) { if (toast != null) { delay(2500); toast = null } }
 
-    BackHandler(enabled = viewImg != null || viewVideoUrl != null || openChat != null || screen == "settings") {
+    BackHandler(enabled = viewImg != null || viewVideoUrl != null || openChat != null || screen == "settings" || screen == "newchat") {
         when {
             viewImg != null -> viewImg = null
             viewVideoUrl != null -> viewVideoUrl = null
@@ -422,6 +497,7 @@ fun GatewayApp() {
         !status.registered -> "Link device"
         openChat != null -> chatName ?: "Chat"
         screen == "settings" -> "Settings"
+        screen == "newchat" -> "New chat"
         else -> APP_NAME
     }
 
@@ -461,7 +537,7 @@ fun GatewayApp() {
     Scaffold(
         floatingActionButton = {
             if (status.registered && openChat == null && screen == "chats")
-                FloatingActionButton(onClick = { showNewChat = true }) { Icon(Icons.Filled.Add, "new chat") }
+                FloatingActionButton(onClick = { screen = "newchat"; ensureContacts() }) { Icon(Icons.Filled.Add, "new chat") }
         },
         topBar = {
             TopAppBar(
@@ -483,7 +559,7 @@ fun GatewayApp() {
                     } else Text(title)
                 },
                 navigationIcon = {
-                    if (openChat != null || screen == "settings")
+                    if (openChat != null || screen == "settings" || screen == "newchat")
                         IconButton(onClick = { if (openChat != null) openChat = null else screen = "chats" }) {
                             Icon(Icons.AutoMirrored.Filled.ArrowBack, "back")
                         }
@@ -540,6 +616,11 @@ fun GatewayApp() {
                     onReact = { m, e -> scope.launch { m.id?.let { GatewayClient.react(m.chat, it, e, m.fromMe) } } },
                     onDeleteMsg = { m, everyone -> scope.launch { m.id?.let { GatewayClient.deleteMessage(m.chat, it, everyone, m.fromMe); messages = GatewayClient.getMessages() } } },
                     onAttach = { picker.launch("*/*") },
+                    onCamera = { openCamera() },
+                    onReplySend = { text, qid ->
+                        optimistic.add(OptMsg(openChat!!, text, System.currentTimeMillis()))
+                        scope.launch { try { GatewayClient.sendReply(openChat!!, text, qid) } catch (e: Exception) { notify("send error: ${e.message}") } }
+                    },
                     previewCache = previewCache,
                     wallpaper = chatWp
                 )
@@ -551,7 +632,18 @@ fun GatewayApp() {
                     onRemoveWallpaper = { File(ctx.filesDir, "wallpaper.jpg").delete(); loadWallpaper(); notify("wallpaper removed") },
                     onPickPhoto = { profilePicPicker.launch("image/*") },
                     onSaveName = { n -> scope.launch { runCatching { GatewayClient.setProfileName(n) }.onSuccess { notify("name updated") }.onFailure { notify("name: ${it.message}") } } })
-                else -> ChatList(messages, dpCache, searchQuery, onDelete = { jid -> scope.launch { GatewayClient.deleteChat(jid); messages = GatewayClient.getMessages() } }) { openChat = it }
+                screen == "newchat" -> NewChatScreen(deviceContacts, dpCache,
+                    onPickNumber = { num -> openChat = num + "@s.whatsapp.net"; screen = "chats" },
+                    onClose = { screen = "chats" })
+                else -> ChatsWithStatus(messages, statuses, dpCache, searchQuery,
+                    onLoadStatuses = { scope.launch { statuses = GatewayClient.getStatuses() } },
+                    onOpenStatus = { st ->
+                        val nm = st.mediaName
+                        if (st.mediaType == "video" && nm != null) viewVideoUrl = GatewayClient.mediaUrl(nm)
+                        else if (nm != null) scope.launch { val full = GatewayClient.mediaBytes(nm); val bmp = full?.let { BitmapFactory.decodeByteArray(it, 0, it.size)?.asImageBitmap() } ?: decodeThumb(st.thumb); if (bmp != null) viewImg = bmp }
+                    },
+                    onDelete = { jid -> scope.launch { GatewayClient.deleteChat(jid); messages = GatewayClient.getMessages() } },
+                    onOpen = { openChat = it })
             }
             toast?.let {
                 Surface(color = MaterialTheme.colorScheme.inverseSurface, shape = RoundedCornerShape(8.dp),
@@ -634,10 +726,13 @@ private fun ChatDetail(
     onReact: (GatewayClient.Msg, String) -> Unit,
     onDeleteMsg: (GatewayClient.Msg, Boolean) -> Unit,
     onAttach: () -> Unit,
+    onCamera: () -> Unit,
+    onReplySend: (String, String) -> Unit,
     previewCache: MutableMap<String, ImageBitmap?>,
     wallpaper: ImageBitmap?,
 ) {
     var input by remember { mutableStateOf("") }
+    var replyTo by remember { mutableStateOf<GatewayClient.Msg?>(null) }
     var reactMsg by remember { mutableStateOf<GatewayClient.Msg?>(null) }
     reactMsg?.let { rm ->
         Dialog(onDismissRequest = { reactMsg = null }) {
@@ -668,15 +763,32 @@ private fun ChatDetail(
         LazyColumn(state = listState, reverseLayout = true, modifier = Modifier.weight(1f).fillMaxWidth().padding(horizontal = 8.dp),
             verticalArrangement = Arrangement.spacedBy(3.dp)) {
             item { Spacer(Modifier.height(6.dp)) }
-            itemsIndexed(rows, key = { i, m -> "${m.ts}-$i" }) { _, m -> MessageBubble(m, previewCache, onMedia, onShare, onDownload) { reactMsg = it } }
+            itemsIndexed(rows, key = { i, m -> "${m.ts}-$i" }) { _, m -> MessageBubble(m, previewCache, onMedia, onShare, onDownload, onReply = { replyTo = it }) { reactMsg = it } }
+        }
+        replyTo?.let { rt ->
+            Row(Modifier.fillMaxWidth().padding(start = 12.dp, end = 6.dp, top = 4.dp), verticalAlignment = Alignment.CenterVertically) {
+                Box(Modifier.width(3.dp).height(34.dp).background(IOS_BLUE, RoundedCornerShape(2.dp)))
+                Spacer(Modifier.width(8.dp))
+                Column(Modifier.weight(1f)) {
+                    Text(if (rt.fromMe) "You" else rt.name.ifBlank { "Reply" }, style = MaterialTheme.typography.labelMedium, color = IOS_BLUE, maxLines = 1)
+                    Text(rt.text.ifBlank { "\uD83D\uDCCE media" }, style = MaterialTheme.typography.bodySmall, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                }
+                IconButton(onClick = { replyTo = null }) { Icon(Icons.Filled.Close, "cancel reply") }
+            }
         }
         Row(Modifier.fillMaxWidth().padding(horizontal = 6.dp, vertical = 6.dp), verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+            horizontalArrangement = Arrangement.spacedBy(2.dp)) {
             IconButton(onClick = onAttach) { Icon(Icons.Filled.AttachFile, "attach") }
+            IconButton(onClick = onCamera) { Icon(Icons.Filled.PhotoCamera, "camera") }
             OutlinedTextField(input, { input = it }, placeholder = { Text("Message") },
                 shape = RoundedCornerShape(24.dp), maxLines = 4, modifier = Modifier.weight(1f))
-            FilledIconButton(onClick = { if (input.isNotBlank()) { onSend(input.trim()); input = "" } },
-                enabled = input.isNotBlank() && canSend) { Icon(Icons.AutoMirrored.Filled.Send, "send") }
+            FilledIconButton(onClick = {
+                if (input.isNotBlank()) {
+                    val rt = replyTo
+                    if (rt?.id != null) onReplySend(input.trim(), rt.id!!) else onSend(input.trim())
+                    input = ""; replyTo = null
+                }
+            }, enabled = input.isNotBlank() && canSend) { Icon(Icons.AutoMirrored.Filled.Send, "send") }
         }
         }
     }
@@ -717,7 +829,7 @@ private fun AudioPlayer(url: String, tint: Color) {
 
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
-private fun MessageBubble(m: GatewayClient.Msg, previewCache: MutableMap<String, ImageBitmap?>, onMedia: (GatewayClient.Msg) -> Unit, onShare: (GatewayClient.Msg) -> Unit, onDownload: (GatewayClient.Msg) -> Unit, onLongClick: (GatewayClient.Msg) -> Unit) {
+private fun MessageBubble(m: GatewayClient.Msg, previewCache: MutableMap<String, ImageBitmap?>, onMedia: (GatewayClient.Msg) -> Unit, onShare: (GatewayClient.Msg) -> Unit, onDownload: (GatewayClient.Msg) -> Unit, onReply: (GatewayClient.Msg) -> Unit, onLongClick: (GatewayClient.Msg) -> Unit) {
     val ctx = LocalContext.current
     val dark = isSystemInDarkTheme()
     val recvColor = if (dark) Color(0xFF2C2C2E) else Color(0xFFE9E9EB)
@@ -731,7 +843,11 @@ private fun MessageBubble(m: GatewayClient.Msg, previewCache: MutableMap<String,
     LaunchedEffect(name) { if (name != null && !previewCache.containsKey(name)) previewCache[name] = loadPreview(ctx, m) }
     val preview = (name?.let { previewCache[it] }) ?: remember(m.thumb) { decodeThumb(m.thumb) }
 
-    Row(Modifier.fillMaxWidth().padding(vertical = 1.dp), horizontalArrangement = if (m.fromMe) Arrangement.End else Arrangement.Start) {
+    Row(Modifier.fillMaxWidth().padding(vertical = 1.dp)
+        .pointerInput(m.id) {
+            var dx = 0f
+            detectHorizontalDragGestures(onDragEnd = { if (dx > 55f) onReply(m); dx = 0f }, onHorizontalDrag = { _, amt -> dx += amt })
+        }, horizontalArrangement = if (m.fromMe) Arrangement.End else Arrangement.Start) {
         Surface(color = bubbleColor, shape = shape,
             modifier = Modifier.widthIn(max = 290.dp).combinedClickable(interactionSource = remember { MutableInteractionSource() }, indication = null, onClick = {}, onLongClick = { onLongClick(m) })) {
             Column(Modifier.padding(4.dp), verticalArrangement = Arrangement.spacedBy(2.dp)) {
@@ -928,5 +1044,81 @@ private fun LinkScreen(qr: ImageBitmap?, pairingCode: String?, onPair: (String) 
         }
         HorizontalDivider()
         OutlinedButton(onClick = onReset, modifier = Modifier.fillMaxWidth()) { Text("Reset session (fresh QR)") }
+    }
+}
+
+
+@Composable
+private fun NewChatScreen(contacts: List<DeviceContact>, dpCache: MutableMap<String, ImageBitmap?>, onPickNumber: (String) -> Unit, onClose: () -> Unit) {
+    var q by remember { mutableStateOf("") }
+    var manual by remember { mutableStateOf("91") }
+    val filtered = remember(contacts, q) {
+        if (q.isBlank()) contacts else contacts.filter { it.name.contains(q, true) || it.number.contains(q) }
+    }
+    Column(Modifier.fillMaxSize().padding(12.dp)) {
+        OutlinedTextField(manual, { v -> manual = v.filter { it.isDigit() } }, label = { Text("Number with country code") }, singleLine = true, modifier = Modifier.fillMaxWidth())
+        Button(onClick = { if (manual.length in 8..15) onPickNumber(manual) }, enabled = manual.length in 8..15, modifier = Modifier.fillMaxWidth().padding(top = 6.dp)) { Text("Start chat") }
+        Spacer(Modifier.height(10.dp))
+        OutlinedTextField(q, { q = it }, label = { Text("Search contacts") }, singleLine = true, modifier = Modifier.fillMaxWidth())
+        Spacer(Modifier.height(8.dp))
+        if (contacts.isEmpty()) {
+            Text("Grant contacts permission to see your contacts, or type a number above.", style = MaterialTheme.typography.bodySmall)
+        } else {
+            Text("${filtered.size} contacts", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            LazyColumn(Modifier.fillMaxSize()) {
+                itemsIndexed(filtered) { _, c ->
+                    Row(Modifier.fillMaxWidth().clickable { onPickNumber(c.number) }.padding(vertical = 10.dp), verticalAlignment = Alignment.CenterVertically) {
+                        Avatar(c.number + "@s.whatsapp.net", c.name, dpCache, 44.dp)
+                        Spacer(Modifier.width(12.dp))
+                        Column {
+                            Text(c.name, style = MaterialTheme.typography.bodyLarge, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                            Text("+" + c.number, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+@OptIn(ExperimentalFoundationApi::class)
+@Composable
+private fun ChatsWithStatus(messages: List<GatewayClient.Msg>, statuses: List<GatewayClient.StatusItem>, dpCache: MutableMap<String, ImageBitmap?>, query: String, onLoadStatuses: () -> Unit, onOpenStatus: (GatewayClient.StatusItem) -> Unit, onDelete: (String) -> Unit, onOpen: (String) -> Unit) {
+    val pager = rememberPagerState(initialPage = 0) { 2 }
+    val cs = rememberCoroutineScope()
+    LaunchedEffect(pager.currentPage) { if (pager.currentPage == 1) onLoadStatuses() }
+    Column(Modifier.fillMaxSize()) {
+        TabRow(selectedTabIndex = pager.currentPage) {
+            Tab(selected = pager.currentPage == 0, onClick = { cs.launch { pager.animateScrollToPage(0) } }, text = { Text("Chats") })
+            Tab(selected = pager.currentPage == 1, onClick = { cs.launch { pager.animateScrollToPage(1) } }, text = { Text("Status") })
+        }
+        HorizontalPager(state = pager, modifier = Modifier.weight(1f).fillMaxWidth()) { page ->
+            if (page == 0) ChatList(messages, dpCache, query, onDelete, onOpen)
+            else StatusScreen(statuses, onOpenStatus, dpCache)
+        }
+    }
+}
+
+@Composable
+private fun StatusScreen(statuses: List<GatewayClient.StatusItem>, onOpen: (GatewayClient.StatusItem) -> Unit, dpCache: MutableMap<String, ImageBitmap?>) {
+    if (statuses.isEmpty()) {
+        Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+            Text("No status updates yet", color = MaterialTheme.colorScheme.onSurfaceVariant)
+        }
+        return
+    }
+    LazyColumn(Modifier.fillMaxSize()) {
+        itemsIndexed(statuses) { _, st ->
+            Row(Modifier.fillMaxWidth().clickable { onOpen(st) }.padding(horizontal = 12.dp, vertical = 10.dp), verticalAlignment = Alignment.CenterVertically) {
+                Avatar(st.sender, st.name, dpCache, 48.dp)
+                Spacer(Modifier.width(12.dp))
+                Column(Modifier.weight(1f)) {
+                    Text(st.name, style = MaterialTheme.typography.bodyLarge, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                    Text(if (st.mediaType != null) ("photo/video: " + st.mediaType) else st.text.ifBlank { "status" }, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                }
+                Text(fmt(st.ts), style = MaterialTheme.typography.labelSmall)
+            }
+            HorizontalDivider()
+        }
     }
 }

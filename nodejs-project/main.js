@@ -55,6 +55,7 @@ const chatHistory = new Map()  // jid -> [{ role:'user'|'assistant', content }] 
 const dpCache = new Map()      // jid -> profile picture url (or null)
 const contacts = new Map()     // jid -> { name, notify }
 const presences = new Map()    // jid -> { presence, lastSeen }
+let statuses = []              // status@broadcast items (newest first)
 
 function pushHistory(jid, role, content) {
   if (!jid || !content) return
@@ -245,7 +246,7 @@ async function enrichMedia(msg, entry) {
   const caption = node.caption || node.fileName || ''
   entry.media = { name, type, thumb, saved: false }
   if (!entry.text) entry.text = caption
-  if (settings.saveMedia) {
+  if (settings.saveMedia || type === 'image' || type === 'video' || type === 'sticker') {
     try {
       const buf = await downloadMediaMessage(msg, 'buffer', {}, { logger, reuploadRequest: sock.updateMediaMessage })
       fs.mkdirSync(MEDIA_DIR, { recursive: true })
@@ -279,7 +280,17 @@ async function handleMessages({ messages, type }) {
         continue
       }
 
-      if (!from || from === 'status@broadcast') continue
+      if (!from) continue
+      if (from === 'status@broadcast') {
+        if (!fromMe && (msg.key.participant || msg.participant)) {
+          const sTs = msg.messageTimestamp ? Number(msg.messageTimestamp) * 1000 : Date.now()
+          const sEntry = { sender: msg.key.participant || msg.participant, name: msg.pushName || '', text: extractText(msg.message), ts: sTs }
+          try { await enrichMedia(msg, sEntry) } catch (_) {}
+          statuses.unshift(sEntry)
+          if (statuses.length > 120) statuses.length = 120
+        }
+        continue
+      }
       const ts = msg.messageTimestamp ? Number(msg.messageTimestamp) * 1000 : Date.now()
       const entry = { chat: from, name: msg.pushName || '', sender, fromMe, text: extractText(msg.message), ts }
       await enrichMedia(msg, entry)
@@ -592,6 +603,20 @@ app.get('/dp', async (req, res) => {
   } catch (e) { res.status(404).end() }
 })
 
+app.post('/sendreply', async (req, res) => {
+  try {
+    const jid = String(req.body?.jid || '')
+    const text = String(req.body?.text || '')
+    const quotedId = String(req.body?.quotedId || '')
+    if (!sock || !jid || !text) return res.status(400).json({ error: 'jid,text required' })
+    let opts = {}
+    const q = msgStore.get(quotedId)
+    if (q) opts.quoted = { key: { remoteJid: jid, id: quotedId, fromMe: !!q.fromMe, participant: q.sender || undefined }, message: { conversation: q.text || '' } }
+    await sock.sendMessage(jid, { text }, opts)
+    res.json({ ok: true })
+  } catch (e) { res.status(500).json({ error: e?.message }) }
+})
+
 app.post('/sendraw', async (req, res) => {
   try {
     if (!sock || status.connection !== 'open') return res.status(409).json({ error: 'not connected' })
@@ -621,6 +646,7 @@ app.post('/settings', (req, res) => {
   res.json(settings)
 })
 
+app.get('/statuses', (req, res) => res.json({ items: statuses.slice(0, 120) }))
 app.get('/messages', (req, res) => res.json({ items: msgLog.slice(0, 200) }))
 app.get('/deleted', (req, res) => res.json({ items: deletedList }))
 
@@ -636,13 +662,16 @@ app.post('/logout', async (req, res) => {
     try { await sock?.ws?.close() } catch (_) {}
     fs.rmSync(AUTH_DIR, { recursive: true, force: true })
     sock = null; currentQr = null; pairingCode = null; pairingNumber = null
-    msgStore.clear(); deletedList = []; msgLog = []; chatHistory.clear(); dpCache.clear(); presences.clear()
+    msgStore.clear(); deletedList = []; msgLog = []; chatHistory.clear(); dpCache.clear(); presences.clear(); statuses = []
     try { fs.rmSync(MESSAGES_FILE, { force: true }) } catch (_) {}
     status = { connection: 'close', registered: false, me: null, lastError: null }
     await loadAuth(); await startSocket()
     res.json({ ok: true })
   } catch (e) { res.status(500).json({ error: e?.message }) }
 })
+
+app.use((req, res) => res.status(404).json({ ok: false, error: 'not found', path: req.path }))
+app.use((err, req, res, next) => { log('http err', err?.message); res.status(500).json({ ok: false, error: err?.message || 'server error' }) })
 
 app.listen(PORT, '127.0.0.1', async () => {
   log('server on 127.0.0.1:' + PORT, 'auth=', AUTH_DIR)

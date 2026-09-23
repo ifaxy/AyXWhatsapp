@@ -109,6 +109,10 @@ object GatewayClient {
     suspend fun react(jid: String, id: String, emoji: String, fromMe: Boolean) = withContext(Dispatchers.IO) {
         post("/react", JSONObject().put("jid", jid).put("id", id).put("emoji", emoji).put("fromMe", fromMe)).optBoolean("ok", false)
     }
+    suspend fun sendReply(jid: String, text: String, quotedId: String) = withContext(Dispatchers.IO) {
+        post("/sendreply", JSONObject().put("jid", jid).put("text", text).put("quotedId", quotedId)).optBoolean("ok", false)
+    }
+
     suspend fun deleteMessage(jid: String, id: String, forEveryone: Boolean, fromMe: Boolean) = withContext(Dispatchers.IO) {
         post("/message/delete", JSONObject().put("jid", jid).put("id", id).put("forEveryone", forEveryone).put("fromMe", fromMe)).optBoolean("ok", false)
     }
@@ -160,6 +164,27 @@ object GatewayClient {
 
     suspend fun getMessages(): List<Msg> = withContext(Dispatchers.IO) {
         try { parseMsgs(get("/messages")) } catch (e: Exception) { emptyList() }
+    }
+
+    data class StatusItem(val sender: String, val name: String, val text: String,
+        val mediaName: String? = null, val mediaType: String? = null, val thumb: String? = null, val ts: Long = 0L)
+    suspend fun getStatuses(): List<StatusItem> = withContext(Dispatchers.IO) {
+        try {
+            val arr = get("/statuses").optJSONArray("items") ?: return@withContext emptyList()
+            (0 until arr.length()).map { i ->
+                val o = arr.getJSONObject(i)
+                val md = o.optJSONObject("media")
+                StatusItem(
+                    sender = o.optString("sender"),
+                    name = o.optString("name").ifEmpty { o.optString("sender").substringBefore("@") },
+                    text = o.optString("text"),
+                    mediaName = md?.optString("name")?.ifEmpty { null },
+                    mediaType = md?.optString("type")?.ifEmpty { null },
+                    thumb = md?.optString("thumb")?.ifEmpty { null },
+                    ts = o.optLong("ts", 0L),
+                )
+            }
+        } catch (e: Exception) { emptyList() }
     }
 
     data class Presence(val online: Boolean, val lastSeen: Long)
