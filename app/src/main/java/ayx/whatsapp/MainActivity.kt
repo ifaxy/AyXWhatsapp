@@ -191,20 +191,10 @@ object ChatFlags {
     fun toggleLocked(jid: String) { if (locked[jid] == true) locked.remove(jid) else locked[jid] = true; save() }
 }
 
-object ContactNames {
-    val map = mutableStateMapOf<String, String>()  // number(digits) -> display name (observable)
-    fun nameFor(jid: String): String? {
-        val num = jid.substringBefore("@").filter { it.isDigit() }
-        if (num.isBlank()) return null
-        map[num]?.let { return it }
-        if (num.length >= 10) { val l10 = num.takeLast(10); map.entries.firstOrNull { it.key.takeLast(10) == l10 }?.let { return it.value } }
-        return null
-    }
-}
 
 private fun chatTitle(msgs: List<GatewayClient.Msg>): String {
     val chat = msgs.firstOrNull()?.chat ?: return "Unknown"
-    ContactNames.nameFor(chat)?.let { if (it.isNotBlank()) return it }
+    ContactStore.nameFor(chat)?.let { if (it.isNotBlank()) return it }
     msgs.firstOrNull { !it.fromMe && it.name.isNotBlank() }?.let { return it.name }
     return when {
         chat.endsWith("@g.us") -> "Group"
@@ -434,10 +424,9 @@ fun GatewayApp() {
         contactsLoading = true
         scope.launch {
             val all = withContext(Dispatchers.IO) { loadDeviceContacts(ctx) }
-            ContactNames.map.clear()
-            all.forEach { ContactNames.map[it.number] = it.name }
+            all.forEach { ContactStore.put(it.number, it.name) }
             val reg = GatewayClient.onWhatsApp(all.map { it.number })   // number -> lid?
-            all.forEach { c -> reg[c.number]?.let { lid -> if (lid.isNotBlank()) ContactNames.map[lid] = c.name } }
+            all.forEach { c -> reg[c.number]?.let { lid -> if (lid.isNotBlank()) ContactStore.put(lid, c.name) } }
             deviceContacts = if (reg.isEmpty()) all else all.filter { reg.containsKey(it.number) }
             contactsLoading = false
         }
@@ -515,12 +504,18 @@ fun GatewayApp() {
 
     LaunchedEffect(Unit) { NodeService.start(ctx) }
     LaunchedEffect(Unit) {
+        ContactStore.init(ctx)
         if (ContextCompat.checkSelfPermission(ctx, Manifest.permission.READ_CONTACTS) == PackageManager.PERMISSION_GRANTED) {
-            // quick names by number first, then full (adds @lid mapping) in background
             val all = withContext(Dispatchers.IO) { loadDeviceContacts(ctx) }
-            all.forEach { ContactNames.map[it.number] = it.name }
+            all.forEach { ContactStore.put(it.number, it.name) }
             doLoadContacts()
         } else contactsPerm.launch(Manifest.permission.READ_CONTACTS)
+    }
+    LaunchedEffect(status.registered) {
+        if (status.registered) {
+            val wa = runCatching { GatewayClient.getContacts() }.getOrDefault(emptyList())
+            wa.forEach { c -> if (c.name.isNotBlank()) { ContactStore.put(c.jid, c.name); if (c.number.isNotBlank()) ContactStore.put(c.number, c.name) } }
+        }
     }
     LaunchedEffect(Unit) {
         while (true) {
@@ -543,7 +538,7 @@ fun GatewayApp() {
     }
     LaunchedEffect(toast) { if (toast != null) { delay(2500); toast = null } }
 
-    BackHandler(enabled = viewImg != null || viewVideoUrl != null || openChat != null || screen == "settings" || screen == "newchat") {
+    BackHandler(enabled = viewImg != null || viewVideoUrl != null || openChat != null || screen == "settings" || screen == "newchat" || screen == "profile") {
         when {
             viewImg != null -> viewImg = null
             viewVideoUrl != null -> viewVideoUrl = null
@@ -645,6 +640,7 @@ fun GatewayApp() {
         openChat != null -> chatName ?: "Chat"
         screen == "settings" -> "Settings"
         screen == "newchat" -> "New chat"
+        screen == "profile" -> "Profile"
         else -> APP_NAME
     }
 
@@ -710,12 +706,12 @@ fun GatewayApp() {
                     } else Text(title, fontWeight = FontWeight.Bold)
                 },
                 navigationIcon = {
-                    if (openChat != null || screen == "settings" || screen == "newchat")
+                    if (openChat != null || screen == "settings" || screen == "newchat" || screen == "profile")
                         IconButton(onClick = { if (openChat != null) openChat = null else screen = "chats" }) {
                             Icon(Icons.AutoMirrored.Filled.ArrowBack, "back")
                         }
                     else if (status.registered && myJid != null)
-                        Box(Modifier.padding(start = 10.dp).clip(CircleShape).clickable { profilePicPicker.launch("image/*") }) { Avatar(myJid!!, "Me", dpCache, 34.dp) }
+                        Box(Modifier.padding(start = 10.dp).clip(CircleShape).clickable { screen = "profile" }) { Avatar(myJid!!, "Me", dpCache, 34.dp) }
                 },
                 actions = {
                     if (status.registered && openChat == null && screen == "chats") {
@@ -801,6 +797,9 @@ fun GatewayApp() {
                     onSaveName = { n -> scope.launch { runCatching { GatewayClient.setProfileName(n) }.onSuccess { notify("name updated") }.onFailure { notify("name: ${it.message}") } } })
                 screen == "newchat" -> NewChatScreen(deviceContacts, contactsLoading, dpCache,
                     onPickNumber = { num -> openChat = num + "@s.whatsapp.net"; screen = "chats" })
+                screen == "profile" -> ProfileScreen(myJid, dpCache,
+                    onPickPhoto = { profilePicPicker.launch("image/*") },
+                    onSaveName = { n -> scope.launch { runCatching { GatewayClient.setProfileName(n) }.onSuccess { notify("name updated") }.onFailure { notify("name: ${it.message}") } } })
                 else -> ChatsWithStatus(messages, statuses, dpCache, searchQuery,
                     onPageChange = { chatsPage = it },
                     onLoadStatuses = { scope.launch { statuses = GatewayClient.getStatuses() } },
@@ -1118,15 +1117,6 @@ private fun SettingsScreen(status: GatewayClient.Status, settings: GatewayClient
             }
         }
 
-        SectionHeader("Profile", section == "profile") { toggle("profile") }
-        AnimatedVisibility(section == "profile") {
-            var pname by remember { mutableStateOf("") }
-            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                OutlinedButton(onClick = onPickPhoto, modifier = Modifier.fillMaxWidth()) { Text("Change profile photo") }
-                OutlinedTextField(pname, { pname = it }, label = { Text("Display name") }, modifier = Modifier.fillMaxWidth())
-                Button(onClick = { if (pname.isNotBlank()) onSaveName(pname.trim()) }, enabled = pname.isNotBlank(), modifier = Modifier.fillMaxWidth()) { Text("Save name") }
-            }
-        }
 
         SectionHeader("Chat wallpaper", section == "wallpaper") { toggle("wallpaper") }
         AnimatedVisibility(section == "wallpaper") {
@@ -1462,7 +1452,8 @@ private fun StatusViewer(statuses: List<GatewayClient.StatusItem>, startSender: 
             .map { it.key to it.value.sortedBy { s -> s.ts } }
     }
     if (groups.isEmpty()) { LaunchedEffect(Unit) { onClose() }; return }
-    var si by remember { mutableStateOf(groups.indexOfFirst { it.first == startSender }.coerceAtLeast(0)) }
+    val target = startSender.substringBefore("@").substringBefore(":").filter { it.isDigit() }
+    var si by remember { mutableStateOf(groups.indexOfFirst { g -> g.first.substringBefore("@").substringBefore(":").filter { it.isDigit() } == target }.coerceAtLeast(0)) }
     var ii by remember { mutableStateOf(0) }
     val group = groups.getOrNull(si) ?: run { LaunchedEffect(Unit) { onClose() }; return }
     val items = group.second
@@ -1508,12 +1499,30 @@ private fun StatusViewer(statuses: List<GatewayClient.StatusItem>, startSender: 
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         Avatar(group.first, group.first.substringBefore("@"), dpCache, 36.dp)
                         Spacer(Modifier.width(10.dp))
-                        Text(if (items.first().mine) "My Status" else (ContactNames.nameFor(group.first) ?: items.first().name.ifBlank { "Status" }), color = Color.White, fontWeight = FontWeight.Bold, maxLines = 1, modifier = Modifier.weight(1f))
+                        Text(if (items.first().mine) "My Status" else (ContactStore.nameFor(group.first) ?: items.first().name.ifBlank { "Status" }), color = Color.White, fontWeight = FontWeight.Bold, maxLines = 1, modifier = Modifier.weight(1f))
                         if (st.mediaName != null) IconButton(onClick = { onDownload(st) }) { Icon(Icons.Filled.Download, "download", tint = Color.White) }
                         IconButton(onClick = onClose) { Icon(Icons.Filled.Close, "close", tint = Color.White) }
                     }
                 }
             }
         }
+    }
+}
+
+
+@Composable
+private fun ProfileScreen(myJid: String?, dpCache: MutableMap<String, ImageBitmap?>, onPickPhoto: () -> Unit, onSaveName: (String) -> Unit) {
+    var name by remember { mutableStateOf("") }
+    Column(Modifier.fillMaxSize().padding(20.dp), horizontalAlignment = Alignment.CenterHorizontally) {
+        Spacer(Modifier.height(20.dp))
+        Box(Modifier.clip(CircleShape).clickable { onPickPhoto() }) {
+            if (myJid != null) Avatar(myJid, "Me", dpCache, 120.dp)
+            else Box(Modifier.size(120.dp).clip(CircleShape).background(MaterialTheme.colorScheme.primaryContainer))
+        }
+        TextButton(onClick = onPickPhoto) { Text("Change photo") }
+        Spacer(Modifier.height(24.dp))
+        OutlinedTextField(name, { name = it }, label = { Text("Your name") }, singleLine = true, modifier = Modifier.fillMaxWidth())
+        Spacer(Modifier.height(14.dp))
+        Button(onClick = { if (name.isNotBlank()) onSaveName(name.trim()) }, enabled = name.isNotBlank(), modifier = Modifier.fillMaxWidth()) { Text("Save name") }
     }
 }
