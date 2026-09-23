@@ -693,6 +693,20 @@ function parseMusicSearch(data) {
   return items
 }
 
+let ytdl = null
+try { ytdl = require('@distube/ytdl-core') } catch (e) { }
+
+app.get('/music/stream', async (req, res) => {
+  try {
+    if (!ytdl) return res.status(500).json({ error: 'stream engine unavailable' })
+    const videoId = String(req.query.videoId || '')
+    if (!videoId) return res.status(400).json({ error: 'videoId required' })
+    const info = await ytdl.getInfo('https://www.youtube.com/watch?v=' + videoId)
+    const fmt = ytdl.chooseFormat(info.formats, { quality: 'highestaudio', filter: 'audioonly' })
+    res.json({ url: fmt.url, duration: Number(info.videoDetails.lengthSeconds || 0) })
+  } catch (e) { log('music stream err', e?.message); res.status(500).json({ error: e?.message }) }
+})
+
 app.get('/music/search', async (req, res) => {
   try {
     const q = String(req.query.q || '').trim()

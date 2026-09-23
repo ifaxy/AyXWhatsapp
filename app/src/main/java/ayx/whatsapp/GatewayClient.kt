@@ -110,6 +110,15 @@ object GatewayClient {
         post("/react", JSONObject().put("jid", jid).put("id", id).put("emoji", emoji).put("fromMe", fromMe)).optBoolean("ok", false)
     }
     data class Song(val title: String, val artist: String, val videoId: String, val thumb: String?)
+    data class Stream(val url: String, val duration: Int)
+    suspend fun musicStream(videoId: String): Stream? = withContext(Dispatchers.IO) {
+        try {
+            val c = (URL("$base/music/stream?videoId=$videoId").openConnection() as HttpURLConnection).apply { connectTimeout = 5000; readTimeout = 40000 }
+            val txt = (if (c.responseCode in 200..299) c.inputStream else c.errorStream)?.bufferedReader()?.use { it.readText() } ?: "{}"
+            val o = JSONObject(txt); val url = o.optString("url")
+            if (url.isBlank()) null else Stream(url, o.optInt("duration", 0))
+        } catch (e: Exception) { null }
+    }
     suspend fun searchMusic(q: String): List<Song> = withContext(Dispatchers.IO) {
         try {
             val enc = java.net.URLEncoder.encode(q, "UTF-8")

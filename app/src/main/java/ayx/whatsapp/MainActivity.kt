@@ -27,6 +27,8 @@ import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
 import androidx.activity.result.PickVisualMediaRequest
+import android.media.MediaPlayer
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.foundation.gestures.detectHorizontalDragGestures
 import androidx.compose.foundation.pager.HorizontalPager
 import androidx.compose.foundation.pager.rememberPagerState
@@ -1315,9 +1317,14 @@ private fun LinkText(text: String, color: Color) {
 @Composable
 private fun StatusEditor(uri: Uri, type: String, onUpload: (String, GatewayClient.Song?) -> Unit, onCancel: () -> Unit) {
     val ctx = LocalContext.current
+    val scope = rememberCoroutineScope()
     var caption by remember { mutableStateOf("") }
     var song by remember { mutableStateOf<GatewayClient.Song?>(null) }
     var musicOpen by remember { mutableStateOf(false) }
+    val player = remember { MediaPlayer() }
+    var playing by remember { mutableStateOf(false) }
+    var loadingSong by remember { mutableStateOf(false) }
+    DisposableEffect(Unit) { onDispose { runCatching { player.release() } } }
     Dialog(onDismissRequest = onCancel, properties = DialogProperties(usePlatformDefaultWidth = false)) {
         Surface(Modifier.fillMaxSize(), color = Color.Black) {
             Column(Modifier.fillMaxSize().statusBarsPadding().navigationBarsPadding().imePadding().padding(12.dp)) {
@@ -1333,7 +1340,28 @@ private fun StatusEditor(uri: Uri, type: String, onUpload: (String, GatewayClien
                         else Text("Preview unavailable", color = Color.White)
                     } else Text("🎬 Video selected", color = Color.White)
                 }
-                song?.let { Text("♪ " + it.title + " — " + it.artist, color = IOS_BLUE, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.padding(vertical = 4.dp)) }
+                song?.let { sg ->
+                    Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.padding(vertical = 4.dp)) {
+                        TextButton(onClick = {
+                            if (playing) { runCatching { player.pause() }; playing = false }
+                            else {
+                                loadingSong = true
+                                scope.launch {
+                                    val st = GatewayClient.musicStream(sg.videoId)
+                                    loadingSong = false
+                                    if (st != null) runCatching {
+                                        player.reset(); player.setDataSource(st.url)
+                                        player.setOnPreparedListener { p -> p.start(); playing = true }
+                                        player.setOnCompletionListener { playing = false }
+                                        player.setOnErrorListener { _, _, _ -> playing = false; true }
+                                        player.prepareAsync()
+                                    }
+                                }
+                            }
+                        }) { Text(if (loadingSong) "…" else if (playing) "⏸ Pause" else "▶ Play", color = IOS_BLUE) }
+                        Text("♪ " + sg.title + " — " + sg.artist, color = IOS_BLUE, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                    }
+                }
                 Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
                     OutlinedTextField(caption, { caption = it }, placeholder = { Text("Caption…") }, singleLine = true, modifier = Modifier.weight(1f))
                     Spacer(Modifier.width(8.dp))
