@@ -109,6 +109,19 @@ object GatewayClient {
     suspend fun react(jid: String, id: String, emoji: String, fromMe: Boolean) = withContext(Dispatchers.IO) {
         post("/react", JSONObject().put("jid", jid).put("id", id).put("emoji", emoji).put("fromMe", fromMe)).optBoolean("ok", false)
     }
+    data class Song(val title: String, val artist: String, val videoId: String, val thumb: String?)
+    suspend fun searchMusic(q: String): List<Song> = withContext(Dispatchers.IO) {
+        try {
+            val enc = java.net.URLEncoder.encode(q, "UTF-8")
+            val c = (URL("$base/music/search?q=$enc").openConnection() as HttpURLConnection).apply {
+                requestMethod = "GET"; connectTimeout = 4000; readTimeout = 30000
+            }
+            val txt = (if (c.responseCode in 200..299) c.inputStream else c.errorStream)?.bufferedReader()?.use { it.readText() } ?: "{}"
+            val arr = JSONObject(txt).optJSONArray("items") ?: return@withContext emptyList()
+            (0 until arr.length()).map { i -> val o = arr.getJSONObject(i); Song(o.optString("title"), o.optString("artist"), o.optString("videoId"), o.optString("thumb").ifEmpty { null }) }
+        } catch (e: Exception) { emptyList() }
+    }
+
     suspend fun postStatus(type: String, dataB64: String, caption: String): Boolean = withContext(Dispatchers.IO) {
         try {
             val body = JSONObject().put("type", type).put("data", dataB64).put("caption", caption).toString()

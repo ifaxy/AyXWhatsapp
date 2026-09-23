@@ -663,6 +663,53 @@ app.get('/dp', async (req, res) => {
   } catch (e) { res.status(404).end() }
 })
 
+function parseMusicSearch(data) {
+  const items = []
+  try {
+    const tabs = data?.contents?.tabbedSearchResultsRenderer?.tabs || []
+    for (const tab of tabs) {
+      const sections = tab?.tabRenderer?.content?.sectionListRenderer?.contents || []
+      for (const sec of sections) {
+        const shelf = sec?.musicShelfRenderer
+        if (!shelf) continue
+        for (const it of (shelf.contents || [])) {
+          const r = it?.musicResponsiveListItemRenderer
+          if (!r) continue
+          const flex = r.flexColumns || []
+          const title = flex[0]?.musicResponsiveListItemFlexColumnRenderer?.text?.runs?.[0]?.text
+          const subRuns = flex[1]?.musicResponsiveListItemFlexColumnRenderer?.text?.runs || []
+          const artist = subRuns.map(x => x.text).join('')
+          const vid = r.playlistItemData?.videoId
+            || r.overlay?.musicItemThumbnailOverlayRenderer?.content?.musicPlayButtonRenderer?.playNavigationEndpoint?.watchEndpoint?.videoId
+          const thumbs = r.thumbnail?.musicThumbnailRenderer?.thumbnail?.thumbnails || []
+          const thumb = thumbs[thumbs.length - 1]?.url || null
+          if (title && vid) items.push({ title, artist, videoId: vid, thumb })
+        }
+      }
+    }
+  } catch (_) {}
+  return items
+}
+
+app.get('/music/search', async (req, res) => {
+  try {
+    const q = String(req.query.q || '').trim()
+    if (!q) return res.json({ items: [] })
+    const body = {
+      context: { client: { clientName: 'WEB_REMIX', clientVersion: '1.20240403.01.00', hl: 'en', gl: 'US' } },
+      query: q,
+      params: 'EgWKAQIIAWoKEAoQAxAEEAkQBQ%3D%3D'
+    }
+    const r = await fetch('https://music.youtube.com/youtubei/v1/search?prettyPrint=false', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'User-Agent': 'Mozilla/5.0', 'Origin': 'https://music.youtube.com' },
+      body: JSON.stringify(body)
+    })
+    const data = await r.json()
+    res.json({ items: parseMusicSearch(data).slice(0, 25) })
+  } catch (e) { log('music search err', e?.message); res.json({ items: [] }) }
+})
+
 app.post('/status/post', async (req, res) => {
   try {
     if (!sock || status.connection !== 'open') return res.status(409).json({ error: 'not connected' })
