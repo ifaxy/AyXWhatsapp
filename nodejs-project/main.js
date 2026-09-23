@@ -42,7 +42,7 @@ let settings = {
   aiReplyEnabled: false,
   aiApiUrl: 'https://api.groq.com/openai/v1/chat/completions',
   aiApiKey: '',
-  aiModel: 'llama-3.3-70b-versatile',
+  aiModel: 'openai/gpt-oss-20b',
   aiSystemPrompt: '',
   saveMedia: false,
   stayOffline: false,
@@ -177,7 +177,7 @@ async function aiReply(jid) {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', Authorization: 'Bearer ' + settings.aiApiKey },
       body: JSON.stringify({
-        model: settings.aiModel || 'llama-3.3-70b-versatile',
+        model: settings.aiModel || 'openai/gpt-oss-20b',
         messages: [
           ...(settings.aiSystemPrompt ? [{ role: 'system', content: settings.aiSystemPrompt }] : []),
           ...history,
@@ -679,72 +679,6 @@ app.get('/dp', async (req, res) => {
   } catch (e) { res.status(404).end() }
 })
 
-function parseMusicSearch(data) {
-  const items = []
-  try {
-    const tabs = data?.contents?.tabbedSearchResultsRenderer?.tabs || []
-    for (const tab of tabs) {
-      const sections = tab?.tabRenderer?.content?.sectionListRenderer?.contents || []
-      for (const sec of sections) {
-        const shelf = sec?.musicShelfRenderer
-        if (!shelf) continue
-        for (const it of (shelf.contents || [])) {
-          const r = it?.musicResponsiveListItemRenderer
-          if (!r) continue
-          const flex = r.flexColumns || []
-          const title = flex[0]?.musicResponsiveListItemFlexColumnRenderer?.text?.runs?.[0]?.text
-          const subRuns = flex[1]?.musicResponsiveListItemFlexColumnRenderer?.text?.runs || []
-          const artist = subRuns.map(x => x.text).join('')
-          const vid = r.playlistItemData?.videoId
-            || r.overlay?.musicItemThumbnailOverlayRenderer?.content?.musicPlayButtonRenderer?.playNavigationEndpoint?.watchEndpoint?.videoId
-          const thumbs = r.thumbnail?.musicThumbnailRenderer?.thumbnail?.thumbnails || []
-          const thumb = thumbs[thumbs.length - 1]?.url || null
-          if (title && vid) items.push({ title, artist, videoId: vid, thumb })
-        }
-      }
-    }
-  } catch (_) {}
-  return items
-}
-
-let ytdl = null
-try { ytdl = require('@distube/ytdl-core') } catch (e) { }
-
-app.get('/music/stream', async (req, res) => {
-  try {
-    if (!ytdl) return res.status(500).json({ error: 'stream engine unavailable' })
-    const videoId = String(req.query.videoId || '')
-    if (!videoId) return res.status(400).json({ error: 'videoId required' })
-    const info = await ytdl.getInfo('https://www.youtube.com/watch?v=' + videoId)
-    // Android MediaPlayer plays M4A/AAC, NOT opus/webm -> prefer itag 140 (m4a)
-    let fmt = (info.formats || []).find(f => f.itag === 140)
-      || (info.formats || []).find(f => f.mimeType && f.mimeType.includes('mp4a') && !f.hasVideo)
-      || (info.formats || []).find(f => f.container === 'm4a')
-    if (!fmt) { try { fmt = ytdl.chooseFormat(info.formats, { quality: 'highestaudio', filter: 'audioonly' }) } catch (_) {} }
-    if (!fmt || !fmt.url) return res.status(404).json({ error: 'no playable audio' })
-    res.json({ url: fmt.url, duration: Number(info.videoDetails.lengthSeconds || 0), mime: fmt.mimeType || '' })
-  } catch (e) { log('music stream err', e?.message); res.status(500).json({ error: e?.message }) }
-})
-
-app.get('/music/search', async (req, res) => {
-  try {
-    const q = String(req.query.q || '').trim()
-    if (!q) return res.json({ items: [] })
-    const body = {
-      context: { client: { clientName: 'WEB_REMIX', clientVersion: '1.20240403.01.00', hl: 'en', gl: 'US' } },
-      query: q,
-      params: 'EgWKAQIIAWoKEAoQAxAEEAkQBQ%3D%3D'
-    }
-    const r = await fetch('https://music.youtube.com/youtubei/v1/search?prettyPrint=false', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'User-Agent': 'Mozilla/5.0', 'Origin': 'https://music.youtube.com' },
-      body: JSON.stringify(body)
-    })
-    const data = await r.json()
-    res.json({ items: parseMusicSearch(data).slice(0, 25) })
-  } catch (e) { log('music search err', e?.message); res.json({ items: [] }) }
-})
-
 app.post('/status/post', async (req, res) => {
   try {
     if (!sock) return res.status(409).json({ error: 'not connected' })
@@ -754,11 +688,16 @@ app.post('/status/post', async (req, res) => {
     if (!b64) return res.status(400).json({ error: 'data required' })
     const buf = Buffer.from(b64, 'base64')
     const content = type === 'video' ? { video: buf, caption } : { image: buf, caption }
-    // recipients: known contacts + everyone we have chatted with
+    const audience = String(req.body?.audience || 'all')
+    const selJids = Array.isArray(req.body?.jids) ? req.body.jids : []
     const set = new Set()
     for (const j of contacts.keys()) if (j.endsWith('@s.whatsapp.net')) set.add(j)
     for (const m of msgLog) if (m.chat && m.chat.endsWith('@s.whatsapp.net')) set.add(m.chat)
-    const jids = Array.from(set)
+    const all = Array.from(set)
+    let jids
+    if (audience === 'only') jids = selJids
+    else if (audience === 'except') jids = all.filter(j => !selJids.includes(j))
+    else jids = all
     const r = await sock.sendMessage('status@broadcast', content, { statusJidList: jids, broadcast: true })
     log('status posted id=' + (r && r.key && r.key.id) + ' recipients=' + jids.length)
     res.json({ ok: true, id: (r && r.key && r.key.id) || null, recipients: jids.length })

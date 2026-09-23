@@ -5,7 +5,6 @@
   "main": "main.js",
   "dependencies": {
     "@whiskeysockets/baileys": "latest",
-    "@distube/ytdl-core": "^4.15.1",
     "express": "^4.19.2",
     "pino": "^9.4.0",
     "qrcode": "^1.5.4"

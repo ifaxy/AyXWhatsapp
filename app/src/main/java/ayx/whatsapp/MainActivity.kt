@@ -522,13 +522,13 @@ fun GatewayApp() {
     }
 
     pendingStatus?.let { ps ->
-        StatusEditor(ps.first, ps.second, onUpload = { caption, _song ->
+        StatusEditor(ps.first, ps.second, deviceContacts, onUpload = { caption, audience, jids ->
             val u = ps.first; val t = ps.second
             pendingStatus = null
             scope.launch {
                 try {
                     val bytes = withContext(Dispatchers.IO) { ctx.contentResolver.openInputStream(u)?.use { it.readBytes() } }
-                    if (bytes != null) { notify("uploading status…"); val ok = GatewayClient.postStatus(t, Base64.encodeToString(bytes, Base64.NO_WRAP), caption); notify(if (ok) "status uploaded" else "upload failed") }
+                    if (bytes != null) { notify("uploading status…"); val ok = GatewayClient.postStatus(t, Base64.encodeToString(bytes, Base64.NO_WRAP), caption, audience, jids); notify(if (ok) "status uploaded" else "upload failed") }
                 } catch (e: Exception) { notify("upload failed: " + e.message) }
             }
         }, onCancel = { pendingStatus = null })
@@ -647,7 +647,7 @@ fun GatewayApp() {
     Scaffold(
         floatingActionButton = {
             if (status.registered && openChat == null && screen == "chats") {
-                if (chatsPage == 1) FloatingActionButton(onClick = { statusPicker.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageAndVideo)) }) { Icon(Icons.Filled.PhotoCamera, "add status") }
+                if (chatsPage == 1) FloatingActionButton(onClick = { ensureContacts(); statusPicker.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageAndVideo)) }) { Icon(Icons.Filled.PhotoCamera, "add status") }
                 else FloatingActionButton(onClick = { screen = "newchat"; ensureContacts() }) { Icon(Icons.Filled.Add, "new chat") }
             }
         },
@@ -1315,52 +1315,26 @@ private fun LinkText(text: String, color: Color) {
 
 
 @Composable
-private fun StatusEditor(uri: Uri, type: String, onUpload: (String, GatewayClient.Song?) -> Unit, onCancel: () -> Unit) {
+private fun StatusEditor(uri: Uri, type: String, contacts: List<DeviceContact>, onUpload: (String, String, List<String>) -> Unit, onCancel: () -> Unit) {
     val ctx = LocalContext.current
-    val scope = rememberCoroutineScope()
     var caption by remember { mutableStateOf("") }
-    var song by remember { mutableStateOf<GatewayClient.Song?>(null) }
-    var musicOpen by remember { mutableStateOf(false) }
-    val player = remember { MediaPlayer() }
-    var playing by remember { mutableStateOf(false) }
-    var loadingSong by remember { mutableStateOf(false) }
-    DisposableEffect(Unit) { onDispose { runCatching { player.release() } } }
+    var audience by remember { mutableStateOf("all") }
+    var selected by remember { mutableStateOf(setOf<String>()) }
+    var pickAudience by remember { mutableStateOf(false) }
+    val audLabel = when (audience) { "except" -> "Except " + selected.size; "only" -> "Only " + selected.size; else -> "My contacts" }
     Dialog(onDismissRequest = onCancel, properties = DialogProperties(usePlatformDefaultWidth = false)) {
         Surface(Modifier.fillMaxSize(), color = Color.Black) {
             Column(Modifier.fillMaxSize().statusBarsPadding().navigationBarsPadding().imePadding().padding(12.dp)) {
                 Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
                     IconButton(onClick = onCancel) { Icon(Icons.Filled.Close, "close", tint = Color.White) }
                     Text("New status", color = Color.White, fontWeight = FontWeight.Bold)
-                    TextButton(onClick = { musicOpen = true }) { Text(if (song == null) "♪ Add music" else "♪ Change", color = IOS_BLUE) }
+                    TextButton(onClick = { pickAudience = true }) { Text(audLabel, color = IOS_BLUE) }
                 }
                 Box(Modifier.weight(1f).fillMaxWidth().clip(RoundedCornerShape(14.dp)).background(Color(0xFF111111)), contentAlignment = Alignment.Center) {
                     if (type == "image") {
                         val bmp = remember(uri) { runCatching { ctx.contentResolver.openInputStream(uri)?.use { BitmapFactory.decodeStream(it)?.asImageBitmap() } }.getOrNull() }
-                        if (bmp != null) Image(bmp, null, Modifier.fillMaxSize(), contentScale = ContentScale.Crop)
-                        else Text("Preview unavailable", color = Color.White)
-                    } else Text("🎬 Video selected", color = Color.White)
-                }
-                song?.let { sg ->
-                    Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.padding(vertical = 4.dp)) {
-                        TextButton(onClick = {
-                            if (playing) { runCatching { player.pause() }; playing = false }
-                            else {
-                                loadingSong = true
-                                scope.launch {
-                                    val st = GatewayClient.musicStream(sg.videoId)
-                                    loadingSong = false
-                                    if (st != null) runCatching {
-                                        player.reset(); player.setDataSource(st.url)
-                                        player.setOnPreparedListener { p -> p.start(); playing = true }
-                                        player.setOnCompletionListener { playing = false }
-                                        player.setOnErrorListener { _, _, _ -> playing = false; true }
-                                        player.prepareAsync()
-                                    }
-                                }
-                            }
-                        }) { Text(if (loadingSong) "…" else if (playing) "⏸ Pause" else "▶ Play", color = IOS_BLUE) }
-                        Text("♪ " + sg.title + " — " + sg.artist, color = IOS_BLUE, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                    }
+                        if (bmp != null) Image(bmp, null, Modifier.fillMaxSize(), contentScale = ContentScale.Crop) else Text("Preview unavailable", color = Color.White)
+                    } else Text("Video selected", color = Color.White)
                 }
                 Row(Modifier.fillMaxWidth().padding(top = 8.dp), verticalAlignment = Alignment.CenterVertically) {
                     OutlinedTextField(caption, { caption = it }, placeholder = { Text("Add a caption…", color = Color.White.copy(alpha = 0.6f)) }, singleLine = true, shape = RoundedCornerShape(26.dp),
@@ -1369,43 +1343,52 @@ private fun StatusEditor(uri: Uri, type: String, onUpload: (String, GatewayClien
                             focusedTextColor = Color.White, unfocusedTextColor = Color.White, cursorColor = Color.White),
                         modifier = Modifier.weight(1f))
                     Spacer(Modifier.width(8.dp))
-                    FilledIconButton(onClick = { onUpload(caption.trim(), song) }) { Icon(Icons.AutoMirrored.Filled.Send, "upload") }
+                    FilledIconButton(onClick = { onUpload(caption.trim(), audience, selected.toList()) }) { Icon(Icons.AutoMirrored.Filled.Send, "upload") }
                 }
             }
         }
     }
-    if (musicOpen) MusicSearchSheet(onPick = { song = it; musicOpen = false }, onClose = { musicOpen = false })
+    if (pickAudience) AudienceSheet(contacts, audience, selected) { a, sset -> audience = a; selected = sset; pickAudience = false }
 }
 
 @Composable
-private fun MusicSearchSheet(onPick: (GatewayClient.Song) -> Unit, onClose: () -> Unit) {
+private fun AudienceSheet(contacts: List<DeviceContact>, audienceIn: String, selectedIn: Set<String>, onDone: (String, Set<String>) -> Unit) {
+    var aud by remember { mutableStateOf(audienceIn) }
+    var sel by remember { mutableStateOf(selectedIn) }
     var q by remember { mutableStateOf("") }
-    var results by remember { mutableStateOf<List<GatewayClient.Song>>(emptyList()) }
-    var loading by remember { mutableStateOf(false) }
-    LaunchedEffect(q) {
-        if (q.trim().length >= 2) { loading = true; delay(450); results = GatewayClient.searchMusic(q.trim()); loading = false } else results = emptyList()
-    }
-    Dialog(onDismissRequest = onClose) {
+    val filtered = remember(contacts, q) { if (q.isBlank()) contacts else contacts.filter { it.name.contains(q, true) || it.number.contains(q) } }
+    Dialog(onDismissRequest = { onDone(aud, sel) }) {
         Surface(shape = RoundedCornerShape(16.dp)) {
-            Column(Modifier.padding(12.dp).heightIn(max = 500.dp)) {
-                Text("Add music (YouTube Music)", fontWeight = FontWeight.Bold)
-                Spacer(Modifier.height(8.dp))
-                OutlinedTextField(q, { q = it }, placeholder = { Text("Search songs…") }, leadingIcon = { Icon(Icons.Filled.Search, null) }, singleLine = true, modifier = Modifier.fillMaxWidth())
-                if (loading) LinearProgressIndicator(Modifier.fillMaxWidth().padding(top = 6.dp))
+            Column(Modifier.padding(14.dp).heightIn(max = 560.dp)) {
+                Text("Status privacy", fontWeight = FontWeight.Bold)
                 Spacer(Modifier.height(6.dp))
-                LazyColumn(Modifier.fillMaxWidth()) {
-                    itemsIndexed(results) { _, s ->
-                        Row(Modifier.fillMaxWidth().clickable { onPick(s) }.padding(vertical = 9.dp), verticalAlignment = Alignment.CenterVertically) {
-                            Icon(Icons.Filled.PlayArrow, null, tint = IOS_BLUE)
-                            Spacer(Modifier.width(10.dp))
-                            Column {
-                                Text(s.title, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                                Text(s.artist, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                AudRadio("My contacts", aud == "all") { aud = "all" }
+                AudRadio("My contacts except…", aud == "except") { aud = "except" }
+                AudRadio("Only share with…", aud == "only") { aud = "only" }
+                if (aud != "all") {
+                    OutlinedTextField(q, { q = it }, placeholder = { Text("Search") }, singleLine = true, modifier = Modifier.fillMaxWidth().padding(vertical = 6.dp))
+                    LazyColumn(Modifier.heightIn(max = 340.dp)) {
+                        itemsIndexed(filtered) { _, c ->
+                            val jid = c.number + "@s.whatsapp.net"
+                            Row(Modifier.fillMaxWidth().clickable { sel = if (jid in sel) sel - jid else sel + jid }.padding(vertical = 8.dp), verticalAlignment = Alignment.CenterVertically) {
+                                Checkbox(jid in sel, { checked -> sel = if (checked) sel + jid else sel - jid })
+                                Spacer(Modifier.width(6.dp))
+                                Text(c.name, maxLines = 1, overflow = TextOverflow.Ellipsis)
                             }
                         }
                     }
                 }
+                Button(onClick = { onDone(aud, sel) }, modifier = Modifier.fillMaxWidth().padding(top = 8.dp)) { Text("Done") }
             }
         }
+    }
+}
+
+@Composable
+private fun AudRadio(label: String, selected: Boolean, onClick: () -> Unit) {
+    Row(Modifier.fillMaxWidth().clickable(onClick = onClick).padding(vertical = 8.dp), verticalAlignment = Alignment.CenterVertically) {
+        RadioButton(selected = selected, onClick = onClick)
+        Spacer(Modifier.width(6.dp))
+        Text(label)
     }
 }
