@@ -374,12 +374,6 @@ fun GatewayApp() {
     var storyView by remember { mutableStateOf<String?>(null) }
     var myJid by remember { mutableStateOf<String?>(null) }
     LaunchedEffect(status.registered) { if (status.registered) { val j = GatewayClient.getMe(); if (j.isNotBlank()) myJid = j } }
-    // load hide/lock flags once
-    LaunchedEffect(Unit) {
-        ChatFlags.prefs = blkPrefs
-        blkPrefs.getStringSet("hidden", emptySet())!!.forEach { ChatFlags.hidden[it] = true }
-        blkPrefs.getStringSet("locked", emptySet())!!.forEach { ChatFlags.locked[it] = true }
-    }
     var pendingLockOpen by remember { mutableStateOf<String?>(null) }
     val unlockLauncher = rememberLauncherForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
         if (result.resultCode == android.app.Activity.RESULT_OK) pendingLockOpen?.let { openChat = it }
@@ -501,6 +495,11 @@ fun GatewayApp() {
     var searchQuery by remember { mutableStateOf("") }
     var chatPresence by remember { mutableStateOf<GatewayClient.Presence?>(null) }
     val blkPrefs = remember { ctx.getSharedPreferences("wagw", Context.MODE_PRIVATE) }
+    LaunchedEffect(Unit) {
+        ChatFlags.prefs = blkPrefs
+        blkPrefs.getStringSet("hidden", emptySet())!!.forEach { ChatFlags.hidden[it] = true }
+        blkPrefs.getStringSet("locked", emptySet())!!.forEach { ChatFlags.locked[it] = true }
+    }
     var blockedJids by remember { mutableStateOf(blkPrefs.getStringSet("blocked", emptySet())!!.toSet()) }
     LaunchedEffect(openChat) { loadChatWp(openChat); NodeService.currentOpenChat = openChat; openChat?.let { NotificationHelper.cancel(ctx, it) } }
     LaunchedEffect(openChat) {
