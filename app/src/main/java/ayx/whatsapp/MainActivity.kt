@@ -487,7 +487,7 @@ fun GatewayApp() {
         if (ContextCompat.checkSelfPermission(ctx, Manifest.permission.READ_CONTACTS) == PackageManager.PERMISSION_GRANTED) {
             val all = withContext(Dispatchers.IO) { loadDeviceContacts(ctx) }
             ContactNames.map.clear(); all.forEach { ContactNames.map[it.number] = it.name }
-        }
+        } else contactsPerm.launch(Manifest.permission.READ_CONTACTS)
     }
     LaunchedEffect(Unit) {
         while (true) {
@@ -650,7 +650,7 @@ fun GatewayApp() {
             }
         },
         topBar = {
-            TopAppBar(
+            CenterAlignedTopAppBar(
                 title = {
                     if (searchMode && openChat == null && screen == "chats") {
                         OutlinedTextField(searchQuery, { searchQuery = it }, placeholder = { Text("Search chats") },
@@ -659,16 +659,16 @@ fun GatewayApp() {
                                 focusedContainerColor = MaterialTheme.colorScheme.surfaceVariant, unfocusedContainerColor = MaterialTheme.colorScheme.surfaceVariant),
                             modifier = Modifier.fillMaxWidth())
                     } else if (openChat != null) {
-                        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.Center) {
-                            Avatar(openChat!!, chatName ?: "?", dpCache, 40.dp, CircleShape)
-                            Spacer(Modifier.width(10.dp))
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Avatar(openChat!!, chatName ?: "?", dpCache, 38.dp, CircleShape)
+                            Spacer(Modifier.width(9.dp))
                             Column(horizontalAlignment = Alignment.CenterHorizontally) {
                                 Text(title, maxLines = 1, fontWeight = FontWeight.Bold, style = MaterialTheme.typography.titleMedium, modifier = Modifier.widthIn(max = 190.dp).basicMarquee())
                                 val sub = chatPresence?.let { pr -> if (pr.online) "online" else if (pr.lastSeen > 0) "last seen " + fmt(pr.lastSeen * 1000) else "" } ?: ""
                                 if (sub.isNotEmpty()) Text(sub, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                             }
                         }
-                    } else Box(Modifier.fillMaxWidth(), contentAlignment = Alignment.Center) { Text(title, fontWeight = FontWeight.Bold) }
+                    } else Text(title, fontWeight = FontWeight.Bold)
                 },
                 navigationIcon = {
                     if (openChat != null || screen == "settings" || screen == "newchat")
@@ -1252,25 +1252,40 @@ private fun ChatsWithStatus(messages: List<GatewayClient.Msg>, statuses: List<Ga
 
 @Composable
 private fun StatusScreen(statuses: List<GatewayClient.StatusItem>, onOpen: (GatewayClient.StatusItem) -> Unit, dpCache: MutableMap<String, ImageBitmap?>) {
-    if (statuses.isEmpty()) {
-        Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-            Text("No status updates yet", color = MaterialTheme.colorScheme.onSurfaceVariant)
-        }
-        return
-    }
+    val mine = statuses.filter { it.mine }
+    val others = statuses.filter { !it.mine }
     LazyColumn(Modifier.fillMaxSize()) {
-        itemsIndexed(statuses) { _, st ->
+        item {
+            Text("My Status", style = MaterialTheme.typography.labelMedium, color = IOS_BLUE, modifier = Modifier.padding(start = 14.dp, top = 12.dp, bottom = 2.dp))
+            if (mine.isEmpty()) {
+                Text("Tap the camera button to add a status update", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.padding(start = 14.dp, top = 4.dp, bottom = 10.dp))
+            } else {
+                val st = mine.first()
+                Row(Modifier.fillMaxWidth().clickable { onOpen(st) }.padding(horizontal = 12.dp, vertical = 8.dp), verticalAlignment = Alignment.CenterVertically) {
+                    Avatar(st.sender, "Me", dpCache, 50.dp)
+                    Spacer(Modifier.width(12.dp))
+                    Column(Modifier.weight(1f)) {
+                        Text("My Status", style = MaterialTheme.typography.bodyLarge, maxLines = 1)
+                        Text(mine.size.toString() + " update(s) · " + fmt(st.ts), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    }
+                }
+            }
+            HorizontalDivider()
+            if (others.isNotEmpty()) Text("Recent updates", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.padding(start = 14.dp, top = 10.dp, bottom = 2.dp))
+        }
+        itemsIndexed(others) { _, st ->
             Row(Modifier.fillMaxWidth().clickable { onOpen(st) }.padding(horizontal = 12.dp, vertical = 10.dp), verticalAlignment = Alignment.CenterVertically) {
-                Avatar(st.sender, st.name, dpCache, 48.dp)
+                Avatar(st.sender, st.name, dpCache, 50.dp)
                 Spacer(Modifier.width(12.dp))
                 Column(Modifier.weight(1f)) {
-                    Text(st.name, style = MaterialTheme.typography.bodyLarge, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                    Text(if (st.mediaType != null) ("photo/video: " + st.mediaType) else st.text.ifBlank { "status" }, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                    Text(st.name.ifBlank { "Status" }, style = MaterialTheme.typography.bodyLarge, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                    Text(if (st.mediaType != null) ("photo/video") else st.text.ifBlank { "status" }, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 1, overflow = TextOverflow.Ellipsis)
                 }
                 Text(fmt(st.ts), style = MaterialTheme.typography.labelSmall)
             }
             HorizontalDivider()
         }
+        if (others.isEmpty()) item { Box(Modifier.fillMaxWidth().padding(24.dp), contentAlignment = Alignment.Center) { Text("No recent updates", color = MaterialTheme.colorScheme.onSurfaceVariant) } }
     }
 }
 

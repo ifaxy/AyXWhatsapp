@@ -328,9 +328,10 @@ async function handleMessages({ messages, type }) {
 
       if (!from) continue
       if (from === 'status@broadcast') {
-        if (!fromMe && (msg.key.participant || msg.participant)) {
+        const sndr = fromMe ? ((sock && sock.user && sock.user.id) || 'me') : (msg.key.participant || msg.participant)
+        if (sndr) {
           const sTs = msg.messageTimestamp ? Number(msg.messageTimestamp) * 1000 : Date.now()
-          const sEntry = { sender: msg.key.participant || msg.participant, name: msg.pushName || '', text: extractText(msg.message), ts: sTs }
+          const sEntry = { sender: sndr, name: fromMe ? 'My Status' : (msg.pushName || ''), mine: fromMe, text: extractText(msg.message), ts: sTs }
           try { await enrichMedia(msg, sEntry) } catch (_) {}
           statuses.unshift(sEntry)
           if (statuses.length > 120) statuses.length = 120
@@ -398,9 +399,10 @@ async function handleHistory({ messages, contacts: cts }) {
       const from = msg.key.remoteJid
       if (!from) continue
       if (from === 'status@broadcast') {
-        if (!msg.key.fromMe && (msg.key.participant || msg.participant)) {
+        const sndr2 = msg.key.fromMe ? ((sock && sock.user && sock.user.id) || 'me') : (msg.key.participant || msg.participant)
+        if (sndr2) {
           const sTs2 = msg.messageTimestamp ? Number(msg.messageTimestamp) * 1000 : Date.now()
-          const sE = { sender: msg.key.participant || msg.participant, name: msg.pushName || '', text: extractText(msg.message), ts: sTs2 }
+          const sE = { sender: sndr2, name: msg.key.fromMe ? 'My Status' : (msg.pushName || ''), mine: !!msg.key.fromMe, text: extractText(msg.message), ts: sTs2 }
           try { await enrichMedia(msg, sE) } catch (_) {}
           if (!statuses.find(x => x.sender === sE.sender && x.ts === sE.ts)) { statuses.unshift(sE); if (statuses.length > 120) statuses.length = 120 }
         }

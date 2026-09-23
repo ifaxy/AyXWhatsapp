@@ -210,7 +210,7 @@ object GatewayClient {
     }
 
     data class StatusItem(val sender: String, val name: String, val text: String,
-        val mediaName: String? = null, val mediaType: String? = null, val thumb: String? = null, val ts: Long = 0L)
+        val mediaName: String? = null, val mediaType: String? = null, val thumb: String? = null, val ts: Long = 0L, val mine: Boolean = false)
     suspend fun getStatuses(): List<StatusItem> = withContext(Dispatchers.IO) {
         try {
             val arr = get("/statuses").optJSONArray("items") ?: return@withContext emptyList()
@@ -225,6 +225,7 @@ object GatewayClient {
                     mediaType = md?.optString("type")?.ifEmpty { null },
                     thumb = md?.optString("thumb")?.ifEmpty { null },
                     ts = o.optLong("ts", 0L),
+                    mine = o.optBoolean("mine", false),
                 )
             }
         } catch (e: Exception) { emptyList() }
