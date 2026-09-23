@@ -77,6 +77,12 @@ import androidx.compose.ui.text.font.FontStyle
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.text.style.TextDecoration
+import androidx.compose.ui.text.buildAnnotatedString
+import androidx.compose.ui.text.LinkAnnotation
+import androidx.compose.ui.text.TextLinkStyles
+import androidx.compose.ui.text.withLink
+import androidx.compose.ui.text.SpanStyle
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.compose.ui.window.Dialog
@@ -271,7 +277,7 @@ fun PrivacyGate(onAgree: () -> Unit) {
     }
 }
 
-class OptMsg(val chat: String, val text: String, val ts: Long)
+class OptMsg(val chat: String, val text: String, val ts: Long, val quotedText: String? = null)
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -628,11 +634,12 @@ fun GatewayApp() {
                     onDeleteMsg = { m, everyone -> scope.launch { m.id?.let { GatewayClient.deleteMessage(m.chat, it, everyone, m.fromMe); messages = GatewayClient.getMessages() } } },
                     onAttach = { picker.launch("*/*") },
                     onCamera = { openCamera() },
-                    onReplySend = { text, qid ->
-                        optimistic.add(OptMsg(openChat!!, text, System.currentTimeMillis()))
+                    onReplySend = { text, qid, qtext ->
+                        optimistic.add(OptMsg(openChat!!, text, System.currentTimeMillis(), qtext))
                         scope.launch { try { GatewayClient.sendReply(openChat!!, text, qid) } catch (e: Exception) { notify("send error: ${e.message}") } }
                     },
                     previewCache = previewCache,
+                    dpCache = dpCache,
                     wallpaper = chatWp
                 )
                 screen == "settings" -> SettingsScreen(status, settings,
@@ -737,8 +744,9 @@ private fun ChatDetail(
     onDeleteMsg: (GatewayClient.Msg, Boolean) -> Unit,
     onAttach: () -> Unit,
     onCamera: () -> Unit,
-    onReplySend: (String, String) -> Unit,
+    onReplySend: (String, String, String) -> Unit,
     previewCache: MutableMap<String, ImageBitmap?>,
+    dpCache: MutableMap<String, ImageBitmap?>,
     wallpaper: ImageBitmap?,
 ) {
     var input by remember { mutableStateOf("") }
@@ -763,7 +771,7 @@ private fun ChatDetail(
     }
     // newest first (reverseLayout shows newest at bottom, opens there, no jump)
     val rows = remember(messages, optimistic) {
-        (messages + optimistic.map { GatewayClient.Msg(chat, "", true, it.text, it.ts) }).sortedByDescending { it.ts }
+        (messages + optimistic.map { GatewayClient.Msg(chat, "", true, it.text, it.ts, quotedText = it.quotedText) }).sortedByDescending { it.ts }
     }
     val listState = rememberLazyListState()
 
@@ -773,7 +781,7 @@ private fun ChatDetail(
         LazyColumn(state = listState, reverseLayout = true, modifier = Modifier.weight(1f).fillMaxWidth().padding(horizontal = 8.dp),
             verticalArrangement = Arrangement.spacedBy(3.dp)) {
             item { Spacer(Modifier.height(6.dp)) }
-            itemsIndexed(rows, key = { i, m -> "${m.ts}-$i" }) { _, m -> MessageBubble(m, previewCache, onMedia, onShare, onDownload, onReply = { replyTo = it }) { reactMsg = it } }
+            itemsIndexed(rows, key = { i, m -> "${m.ts}-$i" }) { _, m -> MessageBubble(m, previewCache, dpCache, onMedia, onShare, onDownload, onReply = { replyTo = it }) { reactMsg = it } }
         }
         replyTo?.let { rt ->
             Row(Modifier.fillMaxWidth().padding(start = 12.dp, end = 6.dp, top = 4.dp), verticalAlignment = Alignment.CenterVertically) {
@@ -795,7 +803,7 @@ private fun ChatDetail(
             FilledIconButton(onClick = {
                 if (input.isNotBlank()) {
                     val rt = replyTo
-                    if (rt?.id != null) onReplySend(input.trim(), rt.id!!) else onSend(input.trim())
+                    if (rt?.id != null) onReplySend(input.trim(), rt.id!!, rt.text) else onSend(input.trim())
                     input = ""; replyTo = null
                 }
             }, enabled = input.isNotBlank() && canSend) { Icon(Icons.AutoMirrored.Filled.Send, "send") }
@@ -839,7 +847,7 @@ private fun AudioPlayer(url: String, tint: Color) {
 
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
-private fun MessageBubble(m: GatewayClient.Msg, previewCache: MutableMap<String, ImageBitmap?>, onMedia: (GatewayClient.Msg) -> Unit, onShare: (GatewayClient.Msg) -> Unit, onDownload: (GatewayClient.Msg) -> Unit, onReply: (GatewayClient.Msg) -> Unit, onLongClick: (GatewayClient.Msg) -> Unit) {
+private fun MessageBubble(m: GatewayClient.Msg, previewCache: MutableMap<String, ImageBitmap?>, dpCache: MutableMap<String, ImageBitmap?>, onMedia: (GatewayClient.Msg) -> Unit, onShare: (GatewayClient.Msg) -> Unit, onDownload: (GatewayClient.Msg) -> Unit, onReply: (GatewayClient.Msg) -> Unit, onLongClick: (GatewayClient.Msg) -> Unit) {
     val ctx = LocalContext.current
     val dark = isSystemInDarkTheme()
     val recvColor = if (dark) Color(0xFF2C2C2E) else Color(0xFFE9E9EB)
@@ -863,7 +871,12 @@ private fun MessageBubble(m: GatewayClient.Msg, previewCache: MutableMap<String,
             )
         }
         .offset { IntOffset(swipeX.roundToInt(), 0) },
+        verticalAlignment = Alignment.Bottom,
         horizontalArrangement = if (m.fromMe) Arrangement.End else Arrangement.Start) {
+        if (!m.fromMe && m.chat.endsWith("@g.us") && !m.sender.isNullOrBlank()) {
+            Avatar(m.sender!!, m.name.ifBlank { "?" }, dpCache, 30.dp)
+            Spacer(Modifier.width(6.dp))
+        }
         Surface(color = bubbleColor, shape = shape,
             modifier = Modifier.widthIn(max = 290.dp).combinedClickable(interactionSource = remember { MutableInteractionSource() }, indication = null, onClick = {}, onLongClick = { onLongClick(m) })) {
             Column(Modifier.padding(4.dp), verticalArrangement = Arrangement.spacedBy(2.dp)) {
@@ -893,7 +906,7 @@ private fun MessageBubble(m: GatewayClient.Msg, previewCache: MutableMap<String,
                         if (m.mediaName != null) AudioPlayer(GatewayClient.mediaUrl(m.mediaName!!), textColor)
                         else Text("Voice message (enable Save media)", color = textColor, style = MaterialTheme.typography.bodySmall)
                     }
-                    if (m.text.isNotBlank()) Text(m.text, color = textColor)
+                    if (m.text.isNotBlank()) LinkText(m.text, textColor)
                     else if (hasMedia && preview == null && m.mediaType != "audio") Text("[${m.mediaType}]", color = textColor, style = MaterialTheme.typography.bodySmall)
                     if (!m.reaction.isNullOrBlank()) {
                         Surface(shape = CircleShape, color = if (m.fromMe) Color.White.copy(alpha = 0.25f) else Color.Black.copy(alpha = 0.15f)) {
@@ -1160,4 +1173,26 @@ private fun StatusScreen(statuses: List<GatewayClient.StatusItem>, onOpen: (Gate
             HorizontalDivider()
         }
     }
+}
+
+
+@Composable
+private fun LinkText(text: String, color: Color) {
+    val annotated = remember(text) {
+        buildAnnotatedString {
+            val regex = Regex("(https?://\\S+|www\\.\\S+)")
+            var last = 0
+            for (mt in regex.findAll(text)) {
+                if (mt.range.first > last) append(text.substring(last, mt.range.first))
+                val raw = mt.value
+                val url = if (raw.startsWith("http")) raw else "https://" + raw
+                withLink(LinkAnnotation.Url(url, TextLinkStyles(SpanStyle(color = Color(0xFF4EA1FF), textDecoration = TextDecoration.Underline)))) {
+                    append(raw)
+                }
+                last = mt.range.last + 1
+            }
+            if (last < text.length) append(text.substring(last))
+        }
+    }
+    Text(annotated, color = color)
 }

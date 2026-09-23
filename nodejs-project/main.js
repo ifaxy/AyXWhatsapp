@@ -293,6 +293,8 @@ async function handleMessages({ messages, type }) {
       const id = msg.key.id
       const sender = msg.key.participant || '' // group: who sent it
 
+      // standalone reaction arrives via messages.reaction; don't show as a message
+      if (msg.message.reactionMessage) continue
       // delete-for-everyone -> protocol REVOKE
       const proto = msg.message.protocolMessage
       if (proto && (proto.type === 0 || proto.type === 'REVOKE')) {
@@ -312,7 +314,7 @@ async function handleMessages({ messages, type }) {
         continue
       }
       const ts = msg.messageTimestamp ? Number(msg.messageTimestamp) * 1000 : Date.now()
-      const entry = { chat: from, name: msg.pushName || '', sender, fromMe, text: extractText(msg.message), ts }
+      const entry = { chat: from, name: msg.pushName || '', sender, fromMe, text: extractText(msg.message), ts, id }
       entry.quoted = quotedOf(msg.message)
       await enrichMedia(msg, entry)
       const text = entry.text
