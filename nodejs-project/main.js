@@ -728,16 +728,21 @@ app.get('/music/search', async (req, res) => {
 
 app.post('/status/post', async (req, res) => {
   try {
-    if (!sock || status.connection !== 'open') return res.status(409).json({ error: 'not connected' })
+    if (!sock) return res.status(409).json({ error: 'not connected' })
     const type = String(req.body?.type || 'image')
     const b64 = String(req.body?.data || '')
     const caption = String(req.body?.caption || '')
     if (!b64) return res.status(400).json({ error: 'data required' })
     const buf = Buffer.from(b64, 'base64')
     const content = type === 'video' ? { video: buf, caption } : { image: buf, caption }
-    const jids = Array.from(contacts.keys()).filter(j => j.endsWith('@s.whatsapp.net'))
-    await sock.sendMessage('status@broadcast', content, jids.length ? { statusJidList: jids } : {})
-    res.json({ ok: true })
+    // recipients: known contacts + everyone we have chatted with
+    const set = new Set()
+    for (const j of contacts.keys()) if (j.endsWith('@s.whatsapp.net')) set.add(j)
+    for (const m of msgLog) if (m.chat && m.chat.endsWith('@s.whatsapp.net')) set.add(m.chat)
+    const jids = Array.from(set)
+    const r = await sock.sendMessage('status@broadcast', content, { statusJidList: jids, broadcast: true })
+    log('status posted id=' + (r && r.key && r.key.id) + ' recipients=' + jids.length)
+    res.json({ ok: true, id: (r && r.key && r.key.id) || null, recipients: jids.length })
   } catch (e) { log('status post err', e?.message); res.status(500).json({ error: e?.message }) }
 })
 

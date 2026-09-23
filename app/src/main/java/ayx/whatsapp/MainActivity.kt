@@ -28,6 +28,7 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
 import androidx.activity.result.PickVisualMediaRequest
 import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.foundation.gestures.detectHorizontalDragGestures
 import androidx.compose.foundation.pager.HorizontalPager
 import androidx.compose.foundation.pager.rememberPagerState
@@ -180,7 +181,7 @@ private val timeFmt = SimpleDateFormat("h:mm a", Locale.getDefault())
 private fun fmt(ts: Long) = if (ts > 0) timeFmt.format(Date(ts)).lowercase(Locale.getDefault()) else ""
 
 object ContactNames {
-    val map = mutableMapOf<String, String>()  // number(digits) -> display name
+    val map = mutableStateMapOf<String, String>()  // number(digits) -> display name (observable)
     fun nameFor(jid: String): String? {
         val num = jid.substringBefore("@").filter { it.isDigit() }
         if (num.isBlank()) return null
@@ -1332,10 +1333,10 @@ private fun StatusEditor(uri: Uri, type: String, onUpload: (String, GatewayClien
                     Text("New status", color = Color.White, fontWeight = FontWeight.Bold)
                     TextButton(onClick = { musicOpen = true }) { Text(if (song == null) "♪ Add music" else "♪ Change", color = IOS_BLUE) }
                 }
-                Box(Modifier.weight(1f).fillMaxWidth(), contentAlignment = Alignment.Center) {
+                Box(Modifier.weight(1f).fillMaxWidth().clip(RoundedCornerShape(14.dp)).background(Color(0xFF111111)), contentAlignment = Alignment.Center) {
                     if (type == "image") {
                         val bmp = remember(uri) { runCatching { ctx.contentResolver.openInputStream(uri)?.use { BitmapFactory.decodeStream(it)?.asImageBitmap() } }.getOrNull() }
-                        if (bmp != null) Image(bmp, null, Modifier.fillMaxWidth(), contentScale = ContentScale.Fit)
+                        if (bmp != null) Image(bmp, null, Modifier.fillMaxSize(), contentScale = ContentScale.Crop)
                         else Text("Preview unavailable", color = Color.White)
                     } else Text("🎬 Video selected", color = Color.White)
                 }
@@ -1361,8 +1362,12 @@ private fun StatusEditor(uri: Uri, type: String, onUpload: (String, GatewayClien
                         Text("♪ " + sg.title + " — " + sg.artist, color = IOS_BLUE, maxLines = 1, overflow = TextOverflow.Ellipsis)
                     }
                 }
-                Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-                    OutlinedTextField(caption, { caption = it }, placeholder = { Text("Caption…") }, singleLine = true, modifier = Modifier.weight(1f))
+                Row(Modifier.fillMaxWidth().padding(top = 8.dp), verticalAlignment = Alignment.CenterVertically) {
+                    OutlinedTextField(caption, { caption = it }, placeholder = { Text("Add a caption…", color = Color.White.copy(alpha = 0.6f)) }, singleLine = true, shape = RoundedCornerShape(26.dp),
+                        colors = OutlinedTextFieldDefaults.colors(focusedBorderColor = Color.Transparent, unfocusedBorderColor = Color.Transparent,
+                            focusedContainerColor = Color.White.copy(alpha = 0.14f), unfocusedContainerColor = Color.White.copy(alpha = 0.14f),
+                            focusedTextColor = Color.White, unfocusedTextColor = Color.White, cursorColor = Color.White),
+                        modifier = Modifier.weight(1f))
                     Spacer(Modifier.width(8.dp))
                     FilledIconButton(onClick = { onUpload(caption.trim(), song) }) { Icon(Icons.AutoMirrored.Filled.Send, "upload") }
                 }
