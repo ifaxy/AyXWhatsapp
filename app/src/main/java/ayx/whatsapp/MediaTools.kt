@@ -242,6 +242,67 @@ object MediaTools {
         }
     }
 
+    // ---------- qt-faststart: move moov atom to front so WhatsApp can play the video ----------
+    fun faststart(inFile: File, outFile: File): Boolean {
+        try {
+            val data = inFile.readBytes()
+            if (data.size < 16) return false
+            val starts = ArrayList<Int>(); val sizes = ArrayList<Int>(); val types = ArrayList<String>()
+            var pos = 0
+            while (pos + 8 <= data.size) {
+                var size = u32(data, pos)
+                val type = String(data, pos + 4, 4, Charsets.US_ASCII)
+                if (size == 1L) size = u64(data, pos + 8) else if (size == 0L) size = (data.size - pos).toLong()
+                if (size < 8 || pos + size > data.size) break
+                starts.add(pos); sizes.add(size.toInt()); types.add(type)
+                pos += size.toInt()
+            }
+            val moovIdx = types.indexOf("moov"); val mdatIdx = types.indexOf("mdat")
+            if (moovIdx < 0 || mdatIdx < 0) return false
+            if (moovIdx < mdatIdx) { inFile.copyTo(outFile, overwrite = true); return true }
+            val moovBytes = data.copyOfRange(starts[moovIdx], starts[moovIdx] + sizes[moovIdx])
+            patchChunkOffsets(moovBytes, sizes[moovIdx].toLong())
+            val ftypIdx = types.indexOf("ftyp")
+            FileOutputStream(outFile).use { os ->
+                if (ftypIdx >= 0) os.write(data, starts[ftypIdx], sizes[ftypIdx])
+                os.write(moovBytes)
+                for (i in starts.indices) { if (i == ftypIdx || i == moovIdx) continue; os.write(data, starts[i], sizes[i]) }
+            }
+            return true
+        } catch (e: Exception) { return false }
+    }
+
+    private fun u32(d: ByteArray, p: Int): Long =
+        ((d[p].toLong() and 0xFF) shl 24) or ((d[p + 1].toLong() and 0xFF) shl 16) or ((d[p + 2].toLong() and 0xFF) shl 8) or (d[p + 3].toLong() and 0xFF)
+    private fun u64(d: ByteArray, p: Int): Long { var v = 0L; for (i in 0 until 8) v = (v shl 8) or (d[p + i].toLong() and 0xFF); return v }
+    private fun putU32(d: ByteArray, p: Int, v: Long) { d[p] = ((v shr 24) and 0xFF).toByte(); d[p + 1] = ((v shr 16) and 0xFF).toByte(); d[p + 2] = ((v shr 8) and 0xFF).toByte(); d[p + 3] = (v and 0xFF).toByte() }
+
+    private fun patchChunkOffsets(moov: ByteArray, delta: Long) {
+        fun scan(start: Int, end: Int) {
+            var p = start
+            while (p + 8 <= end) {
+                val size = u32(moov, p)
+                if (size < 8 || p + size > end) break
+                val type = String(moov, p + 4, 4, Charsets.US_ASCII)
+                when (type) {
+                    "stco" -> {
+                        val cnt = u32(moov, p + 12).toInt(); var ep = p + 16
+                        var i = 0
+                        while (i < cnt && ep + 4 <= end) { putU32(moov, ep, u32(moov, ep) + delta); ep += 4; i++ }
+                    }
+                    "co64" -> {
+                        val cnt = u32(moov, p + 12).toInt(); var ep = p + 16
+                        var i = 0
+                        while (i < cnt && ep + 8 <= end) { val no = u64(moov, ep) + delta; for (k in 0 until 8) moov[ep + 7 - k] = ((no shr (k * 8)) and 0xFF).toByte(); ep += 8; i++ }
+                    }
+                    "moov", "trak", "mdia", "minf", "stbl", "udta", "edts" -> scan(p + 8, (p + size).toInt())
+                }
+                p += size.toInt()
+            }
+        }
+        scan(0, moov.size)
+    }
+
     // ---------- validate final MP4 (duration + video track present) ----------
     fun isValidMp4(f: File): Boolean {
         if (!f.exists() || f.length() < 1024) return false

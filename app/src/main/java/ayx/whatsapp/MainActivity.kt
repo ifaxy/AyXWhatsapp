@@ -606,9 +606,12 @@ fun GatewayApp() {
                             val haveSong = song != null && MediaTools.downloadAndTrimAudio(song.url, aFile, tStart, tEnd) && aFile.length() > 0
                             val audioSrc = if (haveSong) aFile else File(dir, "sil_$stamp.m4a").also { MediaTools.makeSilentAac(durMs, it) }
                             processing = "Finalizing video…"
-                            if (!MediaTools.muxVideoAudio(vFile, audioSrc, outFile)) return@withContext null
+                            val muxTmp = File(dir, "mux_$stamp.mp4")
+                            if (!MediaTools.muxVideoAudio(vFile, audioSrc, muxTmp)) return@withContext null
+                            // move moov atom to front (faststart) so WhatsApp can play it; fall back to raw mux if it fails
+                            if (!MediaTools.faststart(muxTmp, outFile)) runCatching { muxTmp.copyTo(outFile, overwrite = true) }
                             if (!MediaTools.isValidMp4(outFile)) return@withContext null
-                            runCatching { vFile.delete(); aFile.delete(); File(dir, "sil_$stamp.m4a").delete() }
+                            runCatching { vFile.delete(); aFile.delete(); muxTmp.delete(); File(dir, "sil_$stamp.m4a").delete() }
                             outFile
                         }
                         if (finalMp4 != null && finalMp4.exists()) {
