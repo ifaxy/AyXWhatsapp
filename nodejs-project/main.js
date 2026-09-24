@@ -48,6 +48,7 @@ let settings = {
   aiApiUrl: 'https://api.groq.com/openai/v1/chat/completions',
   aiApiKey: '',
   aiModel: 'openai/gpt-oss-20b',
+  groupAiEnabled: false,
   aiSystemPrompt: '',
   saveMedia: false,
   hideStatusRead: true,
@@ -213,6 +214,28 @@ async function aiReply(jid) {
     const out = data?.choices?.[0]?.message?.content
     return out ? String(out).trim() : null
   } catch (e) { log('ai err', e?.message); return null }
+}
+
+const groupDaily = new Map()  // groupJid -> { date, count }
+function _today() { return new Date().toISOString().slice(0, 10) }
+function groupDailyCount(jid) { const e = groupDaily.get(jid); return (!e || e.date !== _today()) ? 0 : e.count }
+function incGroupDaily(jid) { const d = _today(); const e = groupDaily.get(jid); if (!e || e.date !== d) groupDaily.set(jid, { date: d, count: 1 }); else e.count++ }
+
+async function groupAiReply(jid) {
+  if (!settings.aiApiUrl || !settings.aiApiKey) return null
+  const history = (chatHistory.get(jid) || []).slice(-9)
+  const sys = 'You are a friendly, witty member of a WhatsApp group chat (not a formal assistant). Reply briefly and naturally like a real person would, in 1-2 short sentences. CRITICAL: read the recent messages and detect the language and script the group is using — Hindi (Devanagari), Hinglish (Roman Hindi), Bengali (Bangla script), English, etc. — and reply in that SAME language and script. Never say you are an AI or a bot. Be relevant to what was just said, warm and casual.'
+  try {
+    const res = await fetch(settings.aiApiUrl, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: 'Bearer ' + settings.aiApiKey },
+      body: JSON.stringify({ model: settings.aiModel || 'openai/gpt-oss-20b', messages: [{ role: 'system', content: sys }, ...history] }),
+    })
+    if (!res.ok) { log('group ai http', res.status, (await res.text()).slice(0, 150)); return null }
+    const data = await res.json()
+    const out = data?.choices?.[0]?.message?.content
+    return out ? String(out).trim() : null
+  } catch (e) { log('group ai err', e?.message); return null }
 }
 
 function remember(id, entry) {
@@ -408,6 +431,34 @@ async function handleMessages({ messages, type }) {
           }
         }
       }
+
+      // group AI: /ai command (always) or auto-reply on greeting/question (max 10/day/group)
+      const isGroup = from.endsWith('@g.us')
+      if (!fromMe && isGroup && text) {
+        const t = text.trim()
+        const lower = t.toLowerCase()
+        let explicit = false, auto = false
+        if (lower.startsWith('/ai')) {
+          const qq = t.replace(/^\/ai\s*/i, '').trim()
+          pushHistory(from, 'user', qq || t)
+          if (qq) explicit = true
+        } else {
+          pushHistory(from, 'user', t)
+          if (settings.groupAiEnabled && groupDailyCount(from) < 10) {
+            const isGreeting = /^(hi+|he+y+|he+llo+|helo|namaste|namaskar|hola|salaam|assalam|yo|sup)\b/i.test(t)
+            const isQuestion = t.includes('?') || /^(what|why|how|when|who|where|which|kya|kaise|kyu|kyun|kaun|kab|kahan|kitna|ki|ke|bolo|batao)\b/i.test(t)
+            if (isGreeting || isQuestion) auto = true
+          }
+        }
+        if (explicit || auto) {
+          try { await sock.readMessages([msg.key]) } catch (_) {}
+          const reply = await groupAiReply(from)
+          if (reply) {
+            try { await sock.sendMessage(from, { text: reply }); pushHistory(from, 'assistant', reply); if (auto) incGroupDaily(from); log('group ai sent (' + (explicit ? 'cmd' : 'auto ' + groupDailyCount(from) + '/10') + ')') }
+            catch (e) { log('group ai send err', e?.message) }
+          }
+        }
+      }
     } catch (e) { log('handleMessages err', e?.message) }
   }
 }
@@ -441,7 +492,7 @@ async function handleHistory({ messages, contacts: cts }) {
         const sndr2 = msg.key.fromMe ? ((sock && sock.user && sock.user.id) || 'me') : (msg.key.participant || msg.participant)
         if (sndr2) {
           const sTs2 = msg.messageTimestamp ? Number(msg.messageTimestamp) * 1000 : Date.now()
-          const sE = { sender: sndr2, name: msg.key.fromMe ? 'My Status' : (msg.pushName || ''), mine: !!msg.key.fromMe, text: extractText(msg.message), ts: sTs2 }
+          const sE = { sender: sndr2, name: msg.key.fromMe ? 'My Status' : (msg.pushName || ''), mine: !!msg.key.fromMe, id: msg.key.id, text: extractText(msg.message), ts: sTs2 }
           try { await enrichMedia(msg, sE) } catch (_) {}
           if (!statuses.find(x => x.sender === sE.sender && x.ts === sE.ts)) { statuses.unshift(sE); if (statuses.length > 120) statuses.length = 120; saveStatusesDebounced() }
         }
@@ -851,6 +902,17 @@ app.post('/status/post', async (req, res) => {
     const r = await sock.sendMessage('status@broadcast', content, { statusJidList: jids, backgroundColor: '#000000', font: 3 })
     const id = (r && r.key && r.key.id) || null
     diag.push('id=' + id)
+    try {
+      fs.mkdirSync(MEDIA_DIR, { recursive: true })
+      const ext = type === 'video' ? '.mp4' : '.jpg'
+      const mediaName = 'own_' + (id || Date.now()) + ext
+      fs.writeFileSync(path.join(MEDIA_DIR, mediaName), buf)
+      const meJid = (sock && sock.user && sock.user.id) || 'me'
+      statuses = statuses.filter(x => !(x.mine && x.id === id))
+      statuses.unshift({ sender: meJid, name: 'My Status', mine: true, id, text: caption, ts: Date.now(), mediaName, mediaType: type === 'video' ? 'video' : 'image' })
+      if (statuses.length > 120) statuses.length = 120
+      saveStatusesDebounced()
+    } catch (_) {}
     log('status post ' + diag.join(' '))
     res.json({ ok: !!id, id, recipients: jids.length, diag: diag.join(' ') })
   } catch (e) {
@@ -897,6 +959,7 @@ app.post('/settings', (req, res) => {
   if (typeof b.aiApiUrl === 'string') settings.aiApiUrl = b.aiApiUrl
   if (typeof b.aiApiKey === 'string') settings.aiApiKey = b.aiApiKey
   if (typeof b.aiModel === 'string') settings.aiModel = b.aiModel
+  if (typeof b.groupAiEnabled === 'boolean') settings.groupAiEnabled = b.groupAiEnabled
   if (typeof b.aiSystemPrompt === 'string') settings.aiSystemPrompt = b.aiSystemPrompt
   if (typeof b.saveMedia === 'boolean') settings.saveMedia = b.saveMedia
   if (typeof b.stayOffline === 'boolean') settings.stayOffline = b.stayOffline

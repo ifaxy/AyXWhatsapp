@@ -1221,10 +1221,8 @@ private fun SettingsScreen(status: GatewayClient.Status, settings: GatewayClient
         SectionHeader("About", section == "about") { toggle("about") }
         AnimatedVisibility(section == "about") {
             Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                Text("$APP_NAME — Created by imayx", style = MaterialTheme.typography.bodyMedium)
-                OutlinedButton(onClick = { runCatching { ctx.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse("https://t.me/ayxhere"))) } },
-                    modifier = Modifier.fillMaxWidth()) { Text("Contact on Telegram (t.me/ayxhere)") }
-                Text("Runs locally, no data collected. AI reply (if on) sends message text to your chosen API only.", style = MaterialTheme.typography.bodySmall)
+                Text(APP_NAME, style = MaterialTheme.typography.bodyMedium)
+                Text("Runs locally on your device. No data is collected. AI reply (if enabled) sends message text only to the API you configure.", style = MaterialTheme.typography.bodySmall)
             }
         }
 
@@ -1274,6 +1272,8 @@ private fun AutoReplySection(settings: GatewayClient.Settings, onToggle: (JSONOb
     Text("AI auto-reply", style = MaterialTheme.typography.titleMedium)
     Text("Replies with AI when no keyword rule matches. Free key: console.groq.com.", style = MaterialTheme.typography.bodySmall)
     ToggleRow("AI reply enabled", settings.aiReplyEnabled) { onToggle(JSONObject().put("aiReplyEnabled", it)) }
+    ToggleRow("Group AI reply", settings.groupAiEnabled) { onToggle(JSONObject().put("groupAiEnabled", it)) }
+    Text("In groups: auto-replies to greetings/questions (max 10/day per group) and replies in the group's language. Anyone can type \"/ai your question\" to ask directly (no limit). Uses the same API key above.", style = MaterialTheme.typography.bodySmall)
     var url by remember { mutableStateOf(settings.aiApiUrl) }
     var key by remember { mutableStateOf(settings.aiApiKey) }
     var model by remember { mutableStateOf(settings.aiModel) }
