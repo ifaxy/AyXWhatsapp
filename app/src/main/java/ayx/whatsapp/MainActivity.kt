@@ -577,14 +577,14 @@ fun GatewayApp() {
     }
 
     pendingStatus?.let { ps ->
-        StatusEditor(ps.first, ps.second, deviceContacts, onUpload = { caption, audience, jids, song, tStart, tEnd ->
+        StatusEditor(ps.first, ps.second, deviceContacts, onUpload = { caption, audience, jids, song, tStart, tEnd, lyrics ->
             val u = ps.first; val t = ps.second
             pendingStatus = null
             scope.launch {
                 try {
                     if (song == null) {
                         val bytes = withContext(Dispatchers.IO) { ctx.contentResolver.openInputStream(u)?.use { it.readBytes() } }
-                        if (bytes != null) { notify("uploading status…"); val ok = GatewayClient.postStatus(t, Base64.encodeToString(bytes, Base64.NO_WRAP), caption, audience, jids); notify(if (ok) "status uploaded" else "upload failed") }
+                        if (bytes != null) { notify("uploading status…"); val res = GatewayClient.postStatus(t, Base64.encodeToString(bytes, Base64.NO_WRAP), caption, audience, jids); notify(if (res.first) "status uploaded ✓" else "upload failed: " + res.second) }
                     } else {
                         processing = "Creating video…"
                         val finalMp4 = withContext(Dispatchers.IO) {
@@ -594,7 +594,8 @@ fun GatewayApp() {
                             val aFile = File(dir, "ta_$stamp.m4a")
                             val outFile = File(dir, "final_$stamp.mp4")
                             val durMs = (tEnd - tStart).coerceAtLeast(3000L)
-                            val vOk = if (t == "image") MediaTools.photosToVideo(ctx, listOf(u), vFile, durMs) { }
+                            val adjusted = lyrics.filter { it.first in tStart..tEnd }.map { (it.first - tStart) to it.second }
+                            val vOk = if (t == "image") MediaTools.photosToVideo(ctx, listOf(u), vFile, durMs, adjusted) { }
                                       else runCatching { ctx.contentResolver.openInputStream(u)?.use { inp -> FileOutputStream(vFile).use { inp.copyTo(it) } }; true }.getOrDefault(false)
                             if (!vOk) return@withContext null
                             processing = "Preparing audio…"
@@ -607,8 +608,8 @@ fun GatewayApp() {
                         if (finalMp4 != null && finalMp4.exists()) {
                             processing = "Uploading…"
                             val bytes = withContext(Dispatchers.IO) { finalMp4.readBytes() }
-                            val ok = GatewayClient.postStatus("video", Base64.encodeToString(bytes, Base64.NO_WRAP), caption, audience, jids)
-                            notify(if (ok) "status uploaded" else "upload failed")
+                            val res = GatewayClient.postStatus("video", Base64.encodeToString(bytes, Base64.NO_WRAP), caption, audience, jids)
+                            notify(if (res.first) "status uploaded ✓" else "upload failed: " + res.second)
                             runCatching { finalMp4.delete() }
                         } else notify("video processing failed")
                         processing = null
@@ -1416,7 +1417,7 @@ private fun LinkText(text: String, color: Color) {
 
 
 @Composable
-private fun StatusEditor(uri: Uri, type: String, contacts: List<DeviceContact>, onUpload: (String, String, List<String>, GatewayClient.Song?, Long, Long) -> Unit, onCancel: () -> Unit) {
+private fun StatusEditor(uri: Uri, type: String, contacts: List<DeviceContact>, onUpload: (String, String, List<String>, GatewayClient.Song?, Long, Long, List<Pair<Long, String>>) -> Unit, onCancel: () -> Unit) {
     val ctx = LocalContext.current
     var caption by remember { mutableStateOf("") }
     var audience by remember { mutableStateOf("all") }
@@ -1426,6 +1427,7 @@ private fun StatusEditor(uri: Uri, type: String, contacts: List<DeviceContact>, 
     var trimStart by remember { mutableStateOf(0L) }
     var trimEnd by remember { mutableStateOf(15000L) }
     var songToTrim by remember { mutableStateOf<GatewayClient.Song?>(null) }
+    var songLyrics by remember { mutableStateOf<List<Pair<Long, String>>>(emptyList()) }
     var musicOpen by remember { mutableStateOf(false) }
     val player = remember { MediaPlayer() }
     var playing by remember { mutableStateOf(false) }
@@ -1471,7 +1473,7 @@ private fun StatusEditor(uri: Uri, type: String, contacts: List<DeviceContact>, 
                             focusedTextColor = Color.White, unfocusedTextColor = Color.White, cursorColor = Color.White),
                         modifier = Modifier.weight(1f))
                     Spacer(Modifier.width(8.dp))
-                    FilledIconButton(onClick = { onUpload(caption.trim(), audience, selected.toList(), song, trimStart, trimEnd) }) { Icon(Icons.AutoMirrored.Filled.Send, "upload") }
+                    FilledIconButton(onClick = { onUpload(caption.trim(), audience, selected.toList(), song, trimStart, trimEnd, songLyrics) }) { Icon(Icons.AutoMirrored.Filled.Send, "upload") }
                 }
             }
         }
@@ -1479,7 +1481,7 @@ private fun StatusEditor(uri: Uri, type: String, contacts: List<DeviceContact>, 
     if (pickAudience) AudienceSheet(contacts, audience, selected) { a, sset -> audience = a; selected = sset; pickAudience = false }
     if (musicOpen) MusicSearchSheet(onSelect = { songToTrim = it; musicOpen = false }, onClose = { musicOpen = false })
     songToTrim?.let { sng ->
-        AudioTrimmer(sng, onDone = { st, en -> song = sng; trimStart = st; trimEnd = en; songToTrim = null }, onCancel = { songToTrim = null })
+        AudioTrimmer(sng, onDone = { st, en, ly -> song = sng; trimStart = st; trimEnd = en; songLyrics = ly; songToTrim = null }, onCancel = { songToTrim = null })
     }
 }
 
@@ -1687,7 +1689,7 @@ private fun MusicSearchSheet(onSelect: (GatewayClient.Song) -> Unit, onClose: ()
 }
 
 @Composable
-private fun AudioTrimmer(song: GatewayClient.Song, onDone: (Long, Long) -> Unit, onCancel: () -> Unit) {
+private fun AudioTrimmer(song: GatewayClient.Song, onDone: (Long, Long, List<Pair<Long, String>>) -> Unit, onCancel: () -> Unit) {
     val player = remember { MediaPlayer() }
     var durationMs by remember { mutableStateOf(0L) }
     var ready by remember { mutableStateOf(false) }
@@ -1726,7 +1728,7 @@ private fun AudioTrimmer(song: GatewayClient.Song, onDone: (Long, Long) -> Unit,
                         Text(song.title, color = Color.White, fontWeight = FontWeight.Bold, maxLines = 1, overflow = TextOverflow.Ellipsis)
                         Text(song.artist, color = Color.White.copy(alpha = 0.6f), style = MaterialTheme.typography.labelSmall, maxLines = 1, overflow = TextOverflow.Ellipsis)
                     }
-                    TextButton(onClick = { runCatching { player.stop() }; onDone(startMs, endMs) }, enabled = ready) { Text("Done", color = IOS_BLUE, fontWeight = FontWeight.Bold) }
+                    TextButton(onClick = { runCatching { player.stop() }; onDone(startMs, endMs, lyrics) }, enabled = ready) { Text("Done", color = IOS_BLUE, fontWeight = FontWeight.Bold) }
                 }
                 Box(Modifier.weight(1f).fillMaxWidth(), contentAlignment = Alignment.Center) {
                     if (!lyricsLoaded) CircularProgressIndicator(color = Color.White)

@@ -32,7 +32,7 @@ import java.nio.FloatBuffer
 object MediaTools {
 
     // ---------- public: PHOTO(S) -> silent MP4 ----------
-    fun photosToVideo(ctx: Context, uris: List<Uri>, out: File, durationMs: Long, onProgress: (Float) -> Unit): Boolean {
+    fun photosToVideo(ctx: Context, uris: List<Uri>, out: File, durationMs: Long, lyrics: List<Pair<Long, String>>, onProgress: (Float) -> Unit): Boolean {
         val W = 720; val H = 1280; val FPS = 30; val BITRATE = 6_000_000
         val bmps = uris.mapNotNull { runCatching { loadScaledCropped(ctx, it, W, H) }.getOrNull() }
         if (bmps.isEmpty()) return false
@@ -83,19 +83,28 @@ object MediaTools {
                 }
             }
 
-            for ((idx, bmp) in bmps.withIndex()) {
-                quad.uploadBitmap(bmp)
-                val n = if (idx == bmps.size - 1) (totalFrames - frame).coerceAtLeast(1) else perImage
-                repeat(n) {
-                    drain(false)
-                    GLES20.glViewport(0, 0, W, H)
-                    quad!!.draw()
-                    egl!!.setPresentationTime(frame.toLong() * 1_000_000_000L / FPS)
-                    egl!!.swapBuffers()
-                    frame++
-                    if (frame % 5 == 0) onProgress((frame.toFloat() / totalFrames).coerceIn(0f, 1f))
+            var lastKey = ""
+            var composite: Bitmap? = null
+            while (frame < totalFrames) {
+                drain(false)
+                val tMs = frame.toLong() * 1000L / FPS
+                val imgIdx = (frame / perImage).coerceIn(0, bmps.size - 1)
+                val lyric = lyrics.lastOrNull { it.first <= tMs }?.second ?: ""
+                val key = imgIdx.toString() + "|" + lyric
+                if (key != lastKey) {
+                    composite?.recycle()
+                    composite = drawComposite(bmps[imgIdx], lyric, W, H)
+                    quad!!.uploadBitmap(composite!!)
+                    lastKey = key
                 }
+                GLES20.glViewport(0, 0, W, H)
+                quad!!.draw()
+                egl!!.setPresentationTime(frame.toLong() * 1_000_000_000L / FPS)
+                egl!!.swapBuffers()
+                frame++
+                if (frame % 5 == 0) onProgress((frame.toFloat() / totalFrames).coerceIn(0f, 1f))
             }
+            composite?.recycle()
             drain(true)
             onProgress(1f)
             return true
@@ -256,6 +265,37 @@ object MediaTools {
         canvas.drawBitmap(src, m, Paint(Paint.FILTER_BITMAP_FLAG or Paint.ANTI_ALIAS_FLAG))
         runCatching { src.recycle() }
         return target
+    }
+
+    private fun drawComposite(base: Bitmap, lyric: String, w: Int, h: Int): Bitmap {
+        val bmp = base.copy(Bitmap.Config.ARGB_8888, true)
+        if (lyric.isNotBlank()) {
+            val canvas = Canvas(bmp)
+            val paint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+                color = android.graphics.Color.WHITE
+                textSize = h * 0.048f
+                textAlign = Paint.Align.CENTER
+                typeface = android.graphics.Typeface.DEFAULT_BOLD
+                setShadowLayer(10f, 0f, 3f, android.graphics.Color.argb(200, 0, 0, 0))
+            }
+            val lines = wrapText(lyric, paint, w * 0.88f)
+            var y = h * 0.80f
+            for (line in lines.takeLast(3)) { canvas.drawText(line, w / 2f, y, paint); y += paint.textSize * 1.35f }
+        }
+        return bmp
+    }
+
+    private fun wrapText(text: String, paint: Paint, maxW: Float): List<String> {
+        val words = text.split(" ")
+        val lines = ArrayList<String>()
+        var cur = StringBuilder()
+        for (word in words) {
+            val test = if (cur.isEmpty()) word else cur.toString() + " " + word
+            if (paint.measureText(test) <= maxW) { cur = StringBuilder(test) }
+            else { if (cur.isNotEmpty()) lines.add(cur.toString()); cur = StringBuilder(word) }
+        }
+        if (cur.isNotEmpty()) lines.add(cur.toString())
+        return lines
     }
 
     // ---------- EGL base bound to a MediaCodec input Surface ----------

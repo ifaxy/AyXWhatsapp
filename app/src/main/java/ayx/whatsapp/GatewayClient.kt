@@ -144,18 +144,19 @@ object GatewayClient {
         } catch (e: Exception) { emptyList<Song>() to (e.message ?: "connection error") }
     }
 
-    suspend fun postStatus(type: String, dataB64: String, caption: String, audience: String, jids: List<String>): Boolean = withContext(Dispatchers.IO) {
+    suspend fun postStatus(type: String, dataB64: String, caption: String, audience: String, jids: List<String>): Pair<Boolean, String> = withContext(Dispatchers.IO) {
         try {
             val arr = org.json.JSONArray(); jids.forEach { arr.put(it) }
             val body = JSONObject().put("type", type).put("data", dataB64).put("caption", caption).put("audience", audience).put("jids", arr).toString()
             val c = (URL("$base/status/post").openConnection() as HttpURLConnection).apply {
-                requestMethod = "POST"; doOutput = true; connectTimeout = 4000; readTimeout = 120000
+                requestMethod = "POST"; doOutput = true; connectTimeout = 4000; readTimeout = 180000
                 setRequestProperty("Content-Type", "application/json")
             }
             c.outputStream.use { it.write(body.toByteArray()) }
             val txt = (if (c.responseCode in 200..299) c.inputStream else c.errorStream)?.bufferedReader()?.use { it.readText() } ?: "{}"
-            JSONObject(txt).optBoolean("ok", false)
-        } catch (e: Exception) { false }
+            val o = JSONObject(txt)
+            o.optBoolean("ok", false) to (if (o.optBoolean("ok", false)) ("sent id=" + o.optString("id") + " to " + o.optInt("recipients") + " contacts") else (o.optString("error") + " | " + o.optString("diag")))
+        } catch (e: Exception) { false to (e.message ?: "connection error") }
     }
 
     suspend fun onWhatsApp(numbers: List<String>): Map<String, String?> = withContext(Dispatchers.IO) {

@@ -805,13 +805,17 @@ app.get('/music/lyrics', async (req, res) => {
 })
 
 app.post('/status/post', async (req, res) => {
+  const diag = []
   try {
-    if (!sock) return res.status(409).json({ error: 'not connected' })
+    if (!sock) return res.status(409).json({ ok: false, error: 'not connected' })
+    diag.push('conn=' + status.connection)
     const type = String(req.body?.type || 'image')
     const b64 = String(req.body?.data || '')
     const caption = String(req.body?.caption || '')
-    if (!b64) return res.status(400).json({ error: 'data required' })
+    if (!b64) return res.status(400).json({ ok: false, error: 'no data' })
     const buf = Buffer.from(b64, 'base64')
+    if (!buf || buf.length === 0) return res.status(400).json({ ok: false, error: 'empty media' })
+    diag.push('bytes=' + buf.length)
     const content = type === 'video' ? { video: buf, caption } : { image: buf, caption }
     const audience = String(req.body?.audience || 'all')
     const selJids = Array.isArray(req.body?.jids) ? req.body.jids : []
@@ -823,10 +827,16 @@ app.post('/status/post', async (req, res) => {
     if (audience === 'only') jids = selJids
     else if (audience === 'except') jids = all.filter(j => !selJids.includes(j))
     else jids = all
-    const r = await sock.sendMessage('status@broadcast', content, { statusJidList: jids, backgroundColor: '#000000' })
-    log('status posted id=' + (r && r.key && r.key.id) + ' recipients=' + jids.length)
-    res.json({ ok: true, id: (r && r.key && r.key.id) || null, recipients: jids.length })
-  } catch (e) { log('status post err', e?.message); res.status(500).json({ error: e?.message }) }
+    diag.push('recipients=' + jids.length)
+    const r = await sock.sendMessage('status@broadcast', content, { statusJidList: jids, broadcast: true, backgroundColor: '#000000' })
+    const id = (r && r.key && r.key.id) || null
+    diag.push('id=' + id)
+    log('status post ' + diag.join(' '))
+    res.json({ ok: !!id, id, recipients: jids.length, diag: diag.join(' ') })
+  } catch (e) {
+    log('status post ERR ' + (e && e.message) + ' | ' + diag.join(' '))
+    res.status(500).json({ ok: false, error: (e && e.message) || 'send failed', diag: diag.join(' ') })
+  }
 })
 
 app.post('/sendreply', async (req, res) => {
