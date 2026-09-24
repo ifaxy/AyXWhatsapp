@@ -915,9 +915,15 @@ app.post('/status/delete', async (req, res) => {
     if (!sock) return res.status(409).json({ error: 'not connected' })
     const id = String(req.body?.id || '')
     if (!id) return res.status(400).json({ error: 'id required' })
-    await sock.sendMessage('status@broadcast', { delete: { remoteJid: 'status@broadcast', id, fromMe: true } })
+    let meJid
+    try { meJid = sock?.user?.id ? sock.user.id.split(':')[0] + '@s.whatsapp.net' : undefined } catch (_) {}
+    const key = { remoteJid: 'status@broadcast', id, fromMe: true }
+    if (meJid) key.participant = meJid
+    let ok = false, err = ''
+    try { await sock.sendMessage('status@broadcast', { delete: key }); ok = true }
+    catch (e) { err = (e && e.message) || 'delete failed' }
     statuses = statuses.filter(x => x.id !== id); saveStatusesDebounced()
-    res.json({ ok: true })
+    res.json({ ok, error: err })
   } catch (e) { res.status(500).json({ error: e && e.message }) }
 })
 

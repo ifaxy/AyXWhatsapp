@@ -40,6 +40,15 @@ import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.foundation.gestures.detectTransformGestures
 import androidx.compose.ui.BiasAlignment
 import androidx.compose.ui.unit.sp
+import androidx.compose.animation.AnimatedContent
+import androidx.compose.animation.togetherWith
+import androidx.compose.animation.slideInVertically
+import androidx.compose.animation.slideOutVertically
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.scaleIn
+import androidx.compose.animation.scaleOut
+import androidx.compose.animation.core.tween
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.foundation.pager.HorizontalPager
@@ -606,7 +615,7 @@ fun GatewayApp() {
                             val outFile = File(dir, "final_$stamp.mp4")
                             val durMs = (tEnd - tStart).coerceAtLeast(3000L)
                             val ly = if (lyrics.isNotEmpty()) lyrics else runCatching { GatewayClient.getLyrics(song.title, song.artist) }.getOrDefault(emptyList())
-                            val adjusted = ly.filter { it.first in tStart..tEnd }.map { (it.first - tStart) to it.second }
+                            val adjusted = ly.filter { it.first in tStart..tEnd }.map { ((it.first - tStart - 300L).coerceAtLeast(0L)) to it.second }
                             val vOk = if (t == "image") MediaTools.photosToVideo(ctx, listOf(u), vFile, durMs, adjusted, lyricY, lyricScale) { }
                                       else runCatching { ctx.contentResolver.openInputStream(u)?.use { inp -> FileOutputStream(vFile).use { inp.copyTo(it) } }; true }.getOrDefault(false)
                             if (!vOk) return@withContext null
@@ -1461,7 +1470,7 @@ private fun StatusEditor(uri: Uri, type: String, contacts: List<DeviceContact>, 
     val player = remember { MediaPlayer() }
     var playing by remember { mutableStateOf(false) }
     DisposableEffect(Unit) { onDispose { runCatching { player.release() } } }
-    LaunchedEffect(playing) { while (playing) { previewPos = runCatching { player.currentPosition.toLong() }.getOrDefault(previewPos); delay(120) } }
+    LaunchedEffect(playing) { while (playing) { previewPos = runCatching { player.currentPosition.toLong() }.getOrDefault(previewPos); if (trimEnd > 0 && previewPos >= trimEnd) { runCatching { player.seekTo(trimStart.toInt()) }; previewPos = trimStart }; delay(90) } }
     val audLabel = when (audience) { "except" -> "Except " + selected.size; "only" -> "Only " + selected.size; else -> "My contacts" }
     Dialog(onDismissRequest = onCancel, properties = DialogProperties(usePlatformDefaultWidth = false)) {
         Surface(Modifier.fillMaxSize(), color = Color.Black) {
@@ -1477,7 +1486,7 @@ private fun StatusEditor(uri: Uri, type: String, contacts: List<DeviceContact>, 
                         if (bmp != null) Image(bmp, null, Modifier.fillMaxSize(), contentScale = ContentScale.Crop) else Text("Preview unavailable", color = Color.White)
                     } else Text("Video selected", color = Color.White)
                     if (songLyrics.isNotEmpty()) {
-                        val curLyric = songLyrics.lastOrNull { it.first <= previewPos }?.second
+                        val curLyric = songLyrics.lastOrNull { it.first <= previewPos + 300L }?.second
                             ?: songLyrics.firstOrNull { it.first in trimStart..trimEnd }?.second ?: ""
                         Box(Modifier.fillMaxSize().pointerInput(Unit) {
                             detectTransformGestures { _, pan, zoom, _ ->
@@ -1485,10 +1494,15 @@ private fun StatusEditor(uri: Uri, type: String, contacts: List<DeviceContact>, 
                                 lyricScale = (lyricScale * zoom).coerceIn(0.5f, 2.5f)
                             }
                         }) {
-                            if (curLyric.isNotBlank()) Text(curLyric, color = Color.White, fontSize = (22f * lyricScale).sp,
-                                fontWeight = FontWeight.Bold, textAlign = TextAlign.Center,
-                                modifier = Modifier.align(BiasAlignment(0f, lyricY * 2f - 1f)).padding(horizontal = 16.dp)
-                                    .background(Color.Black.copy(alpha = 0.28f), RoundedCornerShape(10.dp)).padding(horizontal = 12.dp, vertical = 5.dp))
+                            AnimatedContent(targetState = curLyric, transitionSpec = {
+                                (slideInVertically(tween(320)) { it / 3 } + fadeIn(tween(320)) + scaleIn(tween(320), initialScale = 0.82f)) togetherWith
+                                (slideOutVertically(tween(260)) { -it / 3 } + fadeOut(tween(200)) + scaleOut(tween(260), targetScale = 1.12f))
+                            }, label = "lyric", modifier = Modifier.align(BiasAlignment(0f, lyricY * 2f - 1f))) { lyric ->
+                                if (lyric.isNotBlank()) Text(lyric, color = Color.White, fontSize = (22f * lyricScale).sp,
+                                    fontWeight = FontWeight.Bold, textAlign = TextAlign.Center,
+                                    modifier = Modifier.padding(horizontal = 16.dp)
+                                        .background(Color.Black.copy(alpha = 0.28f), RoundedCornerShape(10.dp)).padding(horizontal = 12.dp, vertical = 5.dp))
+                            }
                             Text("drag • pinch to resize lyrics", color = Color.White.copy(alpha = 0.5f), style = MaterialTheme.typography.labelSmall,
                                 modifier = Modifier.align(Alignment.TopCenter).padding(top = 6.dp))
                         }
@@ -1503,7 +1517,7 @@ private fun StatusEditor(uri: Uri, type: String, contacts: List<DeviceContact>, 
                             if (playing) { runCatching { player.pause() }; playing = false }
                             else runCatching {
                                 player.reset(); player.setDataSource(sg.url)
-                                player.setOnPreparedListener { it.start(); playing = true }
+                                player.setOnPreparedListener { it.seekTo(trimStart.toInt()); it.start(); playing = true }
                                 player.setOnCompletionListener { playing = false }
                                 player.setOnErrorListener { _, _, _ -> playing = false; true }
                                 player.prepareAsync()
@@ -1694,10 +1708,21 @@ private fun MusicSearchSheet(onSelect: (GatewayClient.Song) -> Unit, onClose: ()
     var error by remember { mutableStateOf("") }
     var previewUrl by remember { mutableStateOf<String?>(null) }
     val player = remember { MediaPlayer() }
+    val lyricsAvail = remember { mutableStateMapOf<String, Boolean>() }
     DisposableEffect(Unit) { onDispose { runCatching { player.release() } } }
     LaunchedEffect(q) {
         if (q.trim().length >= 2) { loading = true; delay(450); val r = GatewayClient.searchMusic(q.trim()); results = r.first; error = r.second; loading = false }
         else { results = emptyList(); error = "" }
+    }
+    // check lyrics availability for the visible songs (cached, throttled)
+    LaunchedEffect(results) {
+        for (sg in results.take(14)) {
+            val key = sg.title + "|" + sg.artist
+            if (!lyricsAvail.containsKey(key)) {
+                lyricsAvail[key] = runCatching { GatewayClient.getLyrics(sg.title, sg.artist).isNotEmpty() }.getOrDefault(false)
+                delay(60)
+            }
+        }
     }
     Dialog(onDismissRequest = { runCatching { player.stop() }; onClose() }) {
         Surface(shape = RoundedCornerShape(16.dp)) {
@@ -1726,6 +1751,11 @@ private fun MusicSearchSheet(onSelect: (GatewayClient.Song) -> Unit, onClose: ()
                             Column(Modifier.weight(1f)) {
                                 Text(sg.title, maxLines = 1, overflow = TextOverflow.Ellipsis)
                                 Text(sg.artist, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                            }
+                            when (lyricsAvail[sg.title + "|" + sg.artist]) {
+                                true -> Text("© lyrics", color = IOS_BLUE, style = MaterialTheme.typography.labelSmall, modifier = Modifier.padding(end = 4.dp))
+                                null -> CircularProgressIndicator(Modifier.size(12.dp), strokeWidth = 1.5.dp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                                else -> {}
                             }
                             Text("Use", color = IOS_BLUE, modifier = Modifier.padding(horizontal = 6.dp))
                         }
