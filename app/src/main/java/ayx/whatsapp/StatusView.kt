@@ -67,7 +67,7 @@ fun StatusViewersSheet(statusIds: List<String>, onClose: () -> Unit) {
                         items(viewers) { pair ->
                             val jid = pair.first
                             val num = jid.substringBefore("@").substringBefore(":")
-                            val resolved = ContactStore.nameFor(jid)
+                            val resolved = ContactStore.nameFor(jid) ?: ""
                             val name = if (resolved.isNotBlank()) resolved else if (pair.second.isNotBlank()) pair.second else num
                             Row(Modifier.fillMaxWidth().padding(vertical = 8.dp), verticalAlignment = Alignment.CenterVertically) {
                                 Box(Modifier.size(42.dp).clip(CircleShape).background(Color(0xFF0A84FF).copy(alpha = 0.30f)), contentAlignment = Alignment.Center) {
