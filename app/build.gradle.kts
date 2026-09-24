@@ -11,8 +11,8 @@ android {
         applicationId = "ayx.whatsapp"
         minSdk = 24
         targetSdk = 34
-        versionCode = 54
-        versionName = "5.4"
+        versionCode = 55
+        versionName = "5.5"
 
         ndk {
             // Ship arm64 only for the spike (covers essentially all modern phones).

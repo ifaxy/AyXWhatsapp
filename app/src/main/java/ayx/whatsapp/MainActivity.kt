@@ -605,7 +605,7 @@ fun GatewayApp() {
                 try {
                     if (song == null) {
                         val bytes = withContext(Dispatchers.IO) { ctx.contentResolver.openInputStream(u)?.use { it.readBytes() } }
-                        if (bytes != null) { notify("uploading status…"); val res = GatewayClient.postStatus(t, Base64.encodeToString(bytes, Base64.NO_WRAP), caption, audience, jids); statusResult = (if (res.first) "✅ " else "❌ ") + res.second }
+                        if (bytes != null) { notify("uploading status…"); val res = GatewayClient.postStatus(t, Base64.encodeToString(bytes, Base64.NO_WRAP), caption, audience, jids); statusResult = (if (res.first) "✅ " else "❌ ") + res.second; if (res.first) { delay(1200); statuses = StatusData.merge(GatewayClient.getStatuses()) } }
                     } else {
                         processing = "Creating video…"
                         val finalMp4 = withContext(Dispatchers.IO) {
@@ -639,6 +639,7 @@ fun GatewayApp() {
                             val res = GatewayClient.postStatus("video", Base64.encodeToString(bytes, Base64.NO_WRAP), caption, audience, jids)
                             statusResult = (if (res.first) "✅ " else "❌ ") + res.second
                             runCatching { finalMp4.delete() }
+                            if (res.first) { delay(1200); statuses = StatusData.merge(GatewayClient.getStatuses()) }
                         } else notify("video processing failed")
                         processing = null
                     }

@@ -1021,7 +1021,19 @@ app.get('/me', (req, res) => {
 app.get('/statuses', (req, res) => {
   const cutoff = Date.now() - 24 * 3600 * 1000
   statuses = statuses.filter(x => x && x.ts && x.ts > cutoff)
-  res.json({ items: statuses.slice(0, 120) })
+  // flatten media (enrichMedia stores it nested as .media.{name,type,thumb}; own-posts store it flat)
+  const items = statuses.slice(0, 120).map(s => ({
+    sender: s.sender,
+    name: s.name || '',
+    text: s.text || '',
+    mediaName: s.mediaName || (s.media && s.media.name) || '',
+    mediaType: s.mediaType || (s.media && s.media.type) || '',
+    thumb: s.thumb || (s.media && s.media.thumb) || '',
+    ts: s.ts,
+    mine: !!s.mine,
+    id: s.id || '',
+  }))
+  res.json({ items })
 })
 app.get('/messages', (req, res) => res.json({ items: msgLog.slice(0, 200) }))
 app.get('/deleted', (req, res) => res.json({ items: deletedList }))
