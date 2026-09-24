@@ -46,6 +46,10 @@ object MediaTools {
                 setInteger(MediaFormat.KEY_BIT_RATE, BITRATE)
                 setInteger(MediaFormat.KEY_FRAME_RATE, FPS)
                 setInteger(MediaFormat.KEY_I_FRAME_INTERVAL, 1)
+                try {
+                    setInteger(MediaFormat.KEY_PROFILE, MediaCodecInfo.CodecProfileLevel.AVCProfileBaseline)
+                    setInteger(MediaFormat.KEY_LEVEL, MediaCodecInfo.CodecProfileLevel.AVCLevel31)
+                } catch (_: Exception) {}
             }
             encoder = MediaCodec.createEncoderByType("video/avc")
             encoder.configure(format, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE)
@@ -182,6 +186,74 @@ object MediaTools {
     }
 
     // ---------- public: mux silent video + audio -> final MP4 (video kept, audio replaced) ----------
+    // ---------- generate a silent AAC track (so every status video has audio -> WhatsApp plays it) ----------
+    fun makeSilentAac(durationMs: Long, out: File): Boolean {
+        val SR = 44100; val CH = 1
+        var codec: MediaCodec? = null
+        var muxer: MediaMuxer? = null
+        try {
+            val fmt = MediaFormat.createAudioFormat("audio/mp4a-latm", SR, CH).apply {
+                setInteger(MediaFormat.KEY_AAC_PROFILE, MediaCodecInfo.CodecProfileLevel.AACObjectLC)
+                setInteger(MediaFormat.KEY_BIT_RATE, 96000)
+                setInteger(MediaFormat.KEY_MAX_INPUT_SIZE, 16384)
+            }
+            codec = MediaCodec.createEncoderByType("audio/mp4a-latm")
+            codec.configure(fmt, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE)
+            codec.start()
+            muxer = MediaMuxer(out.absolutePath, MediaMuxer.OutputFormat.MUXER_OUTPUT_MPEG_4)
+            var track = -1; var started = false
+            val info = MediaCodec.BufferInfo()
+            val totalUs = durationMs * 1000L
+            val frameBytes = 2048 * CH * 2   // ~1024 samples/frame * 2 bytes
+            val silence = ByteArray(frameBytes)
+            var ptsUs = 0L
+            val usPerFrame = (1024L * 1_000_000L) / SR
+            var inputDone = false
+            while (true) {
+                if (!inputDone) {
+                    val inIx = codec.dequeueInputBuffer(10000)
+                    if (inIx >= 0) {
+                        if (ptsUs >= totalUs) {
+                            codec.queueInputBuffer(inIx, 0, 0, ptsUs, MediaCodec.BUFFER_FLAG_END_OF_STREAM)
+                            inputDone = true
+                        } else {
+                            val ib = codec.getInputBuffer(inIx)!!; ib.clear(); ib.put(silence); ib.clear()
+                            codec.queueInputBuffer(inIx, 0, frameBytes, ptsUs, 0)
+                            ptsUs += usPerFrame
+                        }
+                    }
+                }
+                val outIx = codec.dequeueOutputBuffer(info, 10000)
+                if (outIx == MediaCodec.INFO_OUTPUT_FORMAT_CHANGED) {
+                    track = muxer.addTrack(codec.outputFormat); muxer.start(); started = true
+                } else if (outIx >= 0) {
+                    val ob = codec.getOutputBuffer(outIx)!!
+                    if (info.flags and MediaCodec.BUFFER_FLAG_CODEC_CONFIG != 0) info.size = 0
+                    if (info.size > 0 && started) { ob.position(info.offset); ob.limit(info.offset + info.size); muxer.writeSampleData(track, ob, info) }
+                    codec.releaseOutputBuffer(outIx, false)
+                    if (info.flags and MediaCodec.BUFFER_FLAG_END_OF_STREAM != 0) break
+                }
+            }
+            return true
+        } catch (e: Exception) { return false }
+        finally {
+            try { codec?.stop(); codec?.release() } catch (_: Exception) {}
+            try { muxer?.stop(); muxer?.release() } catch (_: Exception) {}
+        }
+    }
+
+    // ---------- validate final MP4 (duration + video track present) ----------
+    fun isValidMp4(f: File): Boolean {
+        if (!f.exists() || f.length() < 1024) return false
+        val mmr = android.media.MediaMetadataRetriever()
+        return try {
+            mmr.setDataSource(f.absolutePath)
+            val dur = mmr.extractMetadata(android.media.MediaMetadataRetriever.METADATA_KEY_DURATION)?.toLongOrNull() ?: 0L
+            val hasVideo = mmr.extractMetadata(android.media.MediaMetadataRetriever.METADATA_KEY_HAS_VIDEO) == "yes"
+            dur > 0L && hasVideo
+        } catch (e: Exception) { false } finally { try { mmr.release() } catch (_: Exception) {} }
+    }
+
     fun muxVideoAudio(videoFile: File, audioFile: File, out: File): Boolean {
         var vEx: MediaExtractor? = null
         var aEx: MediaExtractor? = null

@@ -602,10 +602,13 @@ fun GatewayApp() {
                                       else runCatching { ctx.contentResolver.openInputStream(u)?.use { inp -> FileOutputStream(vFile).use { inp.copyTo(it) } }; true }.getOrDefault(false)
                             if (!vOk) return@withContext null
                             processing = "Preparing audio…"
-                            if (!MediaTools.downloadAndTrimAudio(song.url, aFile, tStart, tEnd)) return@withContext null
+                            // song audio; if it fails, fall back to a silent AAC track so the MP4 always has audio (WhatsApp needs it)
+                            val haveSong = song != null && MediaTools.downloadAndTrimAudio(song.url, aFile, tStart, tEnd) && aFile.length() > 0
+                            val audioSrc = if (haveSong) aFile else File(dir, "sil_$stamp.m4a").also { MediaTools.makeSilentAac(durMs, it) }
                             processing = "Finalizing video…"
-                            if (!MediaTools.muxVideoAudio(vFile, aFile, outFile)) return@withContext null
-                            runCatching { vFile.delete(); aFile.delete() }
+                            if (!MediaTools.muxVideoAudio(vFile, audioSrc, outFile)) return@withContext null
+                            if (!MediaTools.isValidMp4(outFile)) return@withContext null
+                            runCatching { vFile.delete(); aFile.delete(); File(dir, "sil_$stamp.m4a").delete() }
                             outFile
                         }
                         if (finalMp4 != null && finalMp4.exists()) {
