@@ -36,6 +36,10 @@ import androidx.compose.runtime.key
 import androidx.compose.foundation.gestures.detectHorizontalDragGestures
 import androidx.compose.foundation.gestures.detectDragGestures
 import androidx.compose.foundation.Canvas
+import androidx.compose.runtime.rememberUpdatedState
+import androidx.compose.foundation.gestures.detectTransformGestures
+import androidx.compose.ui.BiasAlignment
+import androidx.compose.ui.unit.sp
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.foundation.pager.HorizontalPager
@@ -574,12 +578,17 @@ fun GatewayApp() {
         StatusViewer(statuses, sender, dpCache,
             onDownload = { st -> downloadMedia(scope, ctx, GatewayClient.Msg(st.sender, "", false, st.text, st.ts, st.mediaName, st.mediaType)) { m -> notify(m) } },
             onReply = { jid, text -> scope.launch { runCatching { GatewayClient.sendToJid(jid, text) }.onSuccess { notify("reply sent") }.onFailure { notify("reply failed: " + it.message) } } },
-            onDeleteStatus = { id -> scope.launch { runCatching { GatewayClient.deleteStatus(id) }.onSuccess { notify("status deleted"); statuses = GatewayClient.getStatuses() }.onFailure { notify("delete failed") } } },
+            onDeleteStatus = { id -> scope.launch {
+                        val ok = GatewayClient.deleteStatus(id)
+                        StatusData.remove(id)
+                        statuses = statuses.filterNot { it.id == id }
+                        notify(if (ok) "status deleted ✓" else "delete sent to WhatsApp")
+                    } },
             onClose = { storyView = null })
     }
 
     pendingStatus?.let { ps ->
-        StatusEditor(ps.first, ps.second, deviceContacts, onUpload = { caption, audience, jids, song, tStart, tEnd, lyrics ->
+        StatusEditor(ps.first, ps.second, deviceContacts, onUpload = { caption, audience, jids, song, tStart, tEnd, lyrics, lyricY, lyricScale ->
             val u = ps.first; val t = ps.second
             pendingStatus = null
             scope.launch {
@@ -598,7 +607,7 @@ fun GatewayApp() {
                             val durMs = (tEnd - tStart).coerceAtLeast(3000L)
                             val ly = if (lyrics.isNotEmpty()) lyrics else runCatching { GatewayClient.getLyrics(song.title, song.artist) }.getOrDefault(emptyList())
                             val adjusted = ly.filter { it.first in tStart..tEnd }.map { (it.first - tStart) to it.second }
-                            val vOk = if (t == "image") MediaTools.photosToVideo(ctx, listOf(u), vFile, durMs, adjusted) { }
+                            val vOk = if (t == "image") MediaTools.photosToVideo(ctx, listOf(u), vFile, durMs, adjusted, lyricY, lyricScale) { }
                                       else runCatching { ctx.contentResolver.openInputStream(u)?.use { inp -> FileOutputStream(vFile).use { inp.copyTo(it) } }; true }.getOrDefault(false)
                             if (!vOk) return@withContext null
                             processing = "Preparing audio…"
@@ -1434,7 +1443,7 @@ private fun LinkText(text: String, color: Color) {
 
 
 @Composable
-private fun StatusEditor(uri: Uri, type: String, contacts: List<DeviceContact>, onUpload: (String, String, List<String>, GatewayClient.Song?, Long, Long, List<Pair<Long, String>>) -> Unit, onCancel: () -> Unit) {
+private fun StatusEditor(uri: Uri, type: String, contacts: List<DeviceContact>, onUpload: (String, String, List<String>, GatewayClient.Song?, Long, Long, List<Pair<Long, String>>, Float, Float) -> Unit, onCancel: () -> Unit) {
     val ctx = LocalContext.current
     var caption by remember { mutableStateOf("") }
     var audience by remember { mutableStateOf("all") }
@@ -1445,10 +1454,14 @@ private fun StatusEditor(uri: Uri, type: String, contacts: List<DeviceContact>, 
     var trimEnd by remember { mutableStateOf(15000L) }
     var songToTrim by remember { mutableStateOf<GatewayClient.Song?>(null) }
     var songLyrics by remember { mutableStateOf<List<Pair<Long, String>>>(emptyList()) }
+    var lyricY by remember { mutableStateOf(0.80f) }
+    var lyricScale by remember { mutableStateOf(1f) }
+    var previewPos by remember { mutableStateOf(0L) }
     var musicOpen by remember { mutableStateOf(false) }
     val player = remember { MediaPlayer() }
     var playing by remember { mutableStateOf(false) }
     DisposableEffect(Unit) { onDispose { runCatching { player.release() } } }
+    LaunchedEffect(playing) { while (playing) { previewPos = runCatching { player.currentPosition.toLong() }.getOrDefault(previewPos); delay(120) } }
     val audLabel = when (audience) { "except" -> "Except " + selected.size; "only" -> "Only " + selected.size; else -> "My contacts" }
     Dialog(onDismissRequest = onCancel, properties = DialogProperties(usePlatformDefaultWidth = false)) {
         Surface(Modifier.fillMaxSize(), color = Color.Black) {
@@ -1463,6 +1476,23 @@ private fun StatusEditor(uri: Uri, type: String, contacts: List<DeviceContact>, 
                         val bmp = remember(uri) { runCatching { ctx.contentResolver.openInputStream(uri)?.use { BitmapFactory.decodeStream(it)?.asImageBitmap() } }.getOrNull() }
                         if (bmp != null) Image(bmp, null, Modifier.fillMaxSize(), contentScale = ContentScale.Crop) else Text("Preview unavailable", color = Color.White)
                     } else Text("Video selected", color = Color.White)
+                    if (songLyrics.isNotEmpty()) {
+                        val curLyric = songLyrics.lastOrNull { it.first <= previewPos }?.second
+                            ?: songLyrics.firstOrNull { it.first in trimStart..trimEnd }?.second ?: ""
+                        Box(Modifier.fillMaxSize().pointerInput(Unit) {
+                            detectTransformGestures { _, pan, zoom, _ ->
+                                lyricY = (lyricY + pan.y / size.height.toFloat()).coerceIn(0.1f, 0.92f)
+                                lyricScale = (lyricScale * zoom).coerceIn(0.5f, 2.5f)
+                            }
+                        }) {
+                            if (curLyric.isNotBlank()) Text(curLyric, color = Color.White, fontSize = (22f * lyricScale).sp,
+                                fontWeight = FontWeight.Bold, textAlign = TextAlign.Center,
+                                modifier = Modifier.align(BiasAlignment(0f, lyricY * 2f - 1f)).padding(horizontal = 16.dp)
+                                    .background(Color.Black.copy(alpha = 0.28f), RoundedCornerShape(10.dp)).padding(horizontal = 12.dp, vertical = 5.dp))
+                            Text("drag • pinch to resize lyrics", color = Color.White.copy(alpha = 0.5f), style = MaterialTheme.typography.labelSmall,
+                                modifier = Modifier.align(Alignment.TopCenter).padding(top = 6.dp))
+                        }
+                    }
                 }
                 Row(Modifier.fillMaxWidth().padding(top = 6.dp), verticalAlignment = Alignment.CenterVertically) {
                     val sg = song
@@ -1480,6 +1510,7 @@ private fun StatusEditor(uri: Uri, type: String, contacts: List<DeviceContact>, 
                             }
                         }) { Text(if (playing) "⏸ Pause" else "▶ Play", color = IOS_BLUE) }
                         Text("♪ " + sg.title, color = Color.White, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f))
+                        if (songLyrics.isNotEmpty()) Text("  © lyrics", color = IOS_BLUE, style = MaterialTheme.typography.labelSmall)
                         IconButton(onClick = { runCatching { player.reset() }; playing = false; song = null }) { Icon(Icons.Filled.Close, "remove", tint = Color.White) }
                     }
                 }
@@ -1490,7 +1521,7 @@ private fun StatusEditor(uri: Uri, type: String, contacts: List<DeviceContact>, 
                             focusedTextColor = Color.White, unfocusedTextColor = Color.White, cursorColor = Color.White),
                         modifier = Modifier.weight(1f))
                     Spacer(Modifier.width(8.dp))
-                    FilledIconButton(onClick = { onUpload(caption.trim(), audience, selected.toList(), song, trimStart, trimEnd, songLyrics) }) { Icon(Icons.AutoMirrored.Filled.Send, "upload") }
+                    FilledIconButton(onClick = { onUpload(caption.trim(), audience, selected.toList(), song, trimStart, trimEnd, songLyrics, lyricY, lyricScale) }) { Icon(Icons.AutoMirrored.Filled.Send, "upload") }
                 }
             }
         }
@@ -1793,16 +1824,22 @@ private fun AudioTrimmer(song: GatewayClient.Song, onDone: (Long, Long, List<Pai
 @Composable
 private fun WaveformTrimmer(bars: FloatArray, durationMs: Long, startMs: Long, endMs: Long, posMs: Long, onChange: (Long, Long) -> Unit) {
     val selLen = (endMs - startMs).coerceAtLeast(1000L)
-    var boxW by remember { mutableStateOf(1f) }
-    Canvas(Modifier.fillMaxWidth().height(84.dp).pointerInput(durationMs, selLen) {
-        detectHorizontalDragGestures { _, dragAmount ->
-            if (durationMs <= 0) return@detectHorizontalDragGestures
-            val deltaMs = (dragAmount / boxW * durationMs).toLong()
-            val ns = (startMs + deltaMs).coerceIn(0L, (durationMs - selLen).coerceAtLeast(0L))
-            onChange(ns, ns + selLen)
-        }
+    val curStart by rememberUpdatedState(startMs)
+    val curLen by rememberUpdatedState(selLen)
+    Canvas(Modifier.fillMaxWidth().height(88.dp).pointerInput(durationMs) {
+        val w = size.width.toFloat().coerceAtLeast(1f)
+        var acc = 0L
+        detectHorizontalDragGestures(
+            onDragStart = { acc = curStart },
+            onHorizontalDrag = { _, dragAmount ->
+                if (durationMs > 0) {
+                    val deltaMs = (dragAmount / w * durationMs).toLong()
+                    acc = (acc + deltaMs).coerceIn(0L, (durationMs - curLen).coerceAtLeast(0L))
+                    onChange(acc, acc + curLen)
+                }
+            }
+        )
     }) {
-        boxW = size.width
         val n = bars.size
         val barW = size.width / n
         val selStartX = if (durationMs > 0) startMs.toFloat() / durationMs * size.width else 0f
@@ -1815,15 +1852,14 @@ private fun WaveformTrimmer(bars: FloatArray, durationMs: Long, startMs: Long, e
                 topLeft = androidx.compose.ui.geometry.Offset(bx + 1f, (size.height - h) / 2f),
                 size = androidx.compose.ui.geometry.Size((barW - 2f).coerceAtLeast(1f), h))
         }
-        // selection frame
-        drawRect(Color.White, topLeft = androidx.compose.ui.geometry.Offset(selStartX, 0f),
-            size = androidx.compose.ui.geometry.Size((selEndX - selStartX).coerceAtLeast(2f), size.height),
-            style = Stroke(width = 4f))
-        // playback cursor
+        // dim outside selection + bright frame
+        drawRect(Color.Black.copy(alpha = 0.45f), topLeft = androidx.compose.ui.geometry.Offset(0f, 0f), size = androidx.compose.ui.geometry.Size(selStartX.coerceAtLeast(0f), size.height))
+        drawRect(Color.Black.copy(alpha = 0.45f), topLeft = androidx.compose.ui.geometry.Offset(selEndX, 0f), size = androidx.compose.ui.geometry.Size((size.width - selEndX).coerceAtLeast(0f), size.height))
+        drawRect(Color(0xFF4EA1FF), topLeft = androidx.compose.ui.geometry.Offset(selStartX, 0f),
+            size = androidx.compose.ui.geometry.Size((selEndX - selStartX).coerceAtLeast(2f), size.height), style = Stroke(width = 5f))
         if (posMs in startMs..endMs && durationMs > 0) {
             val px = posMs.toFloat() / durationMs * size.width
-            drawRect(Color.Yellow, topLeft = androidx.compose.ui.geometry.Offset(px - 1.5f, 0f),
-                size = androidx.compose.ui.geometry.Size(3f, size.height))
+            drawRect(Color.Yellow, topLeft = androidx.compose.ui.geometry.Offset(px - 1.5f, 0f), size = androidx.compose.ui.geometry.Size(3f, size.height))
         }
     }
 }

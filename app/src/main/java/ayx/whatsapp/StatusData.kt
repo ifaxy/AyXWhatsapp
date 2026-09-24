@@ -55,6 +55,11 @@ object StatusData {
     private fun keyOf(s: GatewayClient.StatusItem): String =
         s.sender.substringBefore("@").substringBefore(":").filter { it.isDigit() } + ":" + (s.id ?: s.ts.toString())
 
+    fun remove(id: String) {
+        if (id.isBlank()) return
+        save(load().filterNot { it.id == id })
+    }
+
     fun save(items: List<GatewayClient.StatusItem>) {
         try {
             val arr = JSONArray()
