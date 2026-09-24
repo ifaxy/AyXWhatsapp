@@ -34,6 +34,9 @@ import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.key
 import androidx.compose.foundation.gestures.detectHorizontalDragGestures
+import androidx.compose.foundation.gestures.detectDragGestures
+import androidx.compose.foundation.Canvas
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.foundation.pager.HorizontalPager
 import androidx.compose.foundation.pager.rememberPagerState
 import androidx.compose.ui.input.pointer.pointerInput
@@ -158,6 +161,7 @@ class MainActivity : ComponentActivity() {
             if (!num.isNullOrBlank()) AppNav.pendingOpenChat.value = num + "@s.whatsapp.net"
         }
 
+        StatusData.init(applicationContext)
         setContent {
             val dark = isSystemInDarkTheme()
             MaterialTheme(colorScheme = if (dark) darkColorScheme() else lightColorScheme()) {
@@ -444,7 +448,7 @@ fun GatewayApp() {
         else contactsPerm.launch(Manifest.permission.READ_CONTACTS)
     }
 
-    var statuses by remember { mutableStateOf<List<GatewayClient.StatusItem>>(emptyList()) }
+    var statuses by remember { mutableStateOf(StatusData.load()) }
 
     val wallpaperPicker = rememberLauncherForActivityResult(ActivityResultContracts.GetContent()) { uri: Uri? ->
         if (uri != null) scope.launch {
@@ -847,7 +851,7 @@ fun GatewayApp() {
                     onSaveName = { n -> scope.launch { runCatching { GatewayClient.setProfileName(n) }.onSuccess { notify("name updated") }.onFailure { notify("name: ${it.message}") } } })
                 else -> ChatsWithStatus(messages, statuses, dpCache, searchQuery,
                     onPageChange = { chatsPage = it },
-                    onLoadStatuses = { scope.launch { statuses = GatewayClient.getStatuses() } },
+                    onLoadStatuses = { scope.launch { val fresh = GatewayClient.getStatuses(); statuses = if (fresh.isNotEmpty()) StatusData.merge(fresh) else StatusData.load() } },
                     onOpenStatus = { st -> storyView = st.sender },
                     onDelete = { jid -> scope.launch { GatewayClient.deleteChat(jid); messages = GatewayClient.getMessages() } },
                     onOpen = { jid ->
@@ -1686,39 +1690,107 @@ private fun MusicSearchSheet(onSelect: (GatewayClient.Song) -> Unit, onClose: ()
 private fun AudioTrimmer(song: GatewayClient.Song, onDone: (Long, Long) -> Unit, onCancel: () -> Unit) {
     val player = remember { MediaPlayer() }
     var durationMs by remember { mutableStateOf(0L) }
-    var start by remember { mutableStateOf(0f) }
-    var len by remember { mutableStateOf(15000f) }
-    var playing by remember { mutableStateOf(false) }
     var ready by remember { mutableStateOf(false) }
+    var startMs by remember { mutableStateOf(0L) }
+    var endMs by remember { mutableStateOf(15000L) }
+    var posMs by remember { mutableStateOf(0L) }
+    var playing by remember { mutableStateOf(false) }
+    var lyrics by remember { mutableStateOf<List<Pair<Long, String>>>(emptyList()) }
+    var lyricsLoaded by remember { mutableStateOf(false) }
+    val bars = remember(song.url) { val r = java.util.Random(song.url.hashCode().toLong()); FloatArray(64) { 0.22f + r.nextFloat() * 0.78f } }
     DisposableEffect(Unit) {
         runCatching {
             player.setDataSource(song.url)
-            player.setOnPreparedListener { durationMs = it.duration.toLong().coerceAtLeast(1L); ready = true }
-            player.setOnErrorListener { _, _, _ -> true }
+            player.setOnPreparedListener { durationMs = it.duration.toLong().coerceAtLeast(1000L); endMs = minOf(15000L, durationMs); ready = true }
             player.setOnCompletionListener { playing = false }
+            player.setOnErrorListener { _, _, _ -> true }
             player.prepareAsync()
         }
         onDispose { runCatching { player.release() } }
     }
-    Dialog(onDismissRequest = onCancel) {
-        Surface(shape = RoundedCornerShape(16.dp)) {
-            Column(Modifier.padding(16.dp)) {
-                Text("Trim — " + song.title, fontWeight = FontWeight.Bold, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                Spacer(Modifier.height(10.dp))
-                Text("Start: " + (start / 1000).toInt() + "s     Length: " + (len / 1000).toInt() + "s", style = MaterialTheme.typography.bodySmall)
-                Text("Start position", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                Slider(value = start, onValueChange = { start = it }, valueRange = 0f..(durationMs.toFloat().coerceAtLeast(1f)))
-                Text("Clip length", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                Slider(value = len, onValueChange = { len = it }, valueRange = 3000f..30000f)
-                Spacer(Modifier.height(8.dp))
-                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
-                    TextButton(onClick = { if (playing) { runCatching { player.pause() }; playing = false } else runCatching { player.seekTo(start.toInt()); player.start(); playing = true } }, enabled = ready) { Text(if (playing) "Pause" else "Preview") }
-                    Spacer(Modifier.width(8.dp))
-                    TextButton(onClick = onCancel) { Text("Cancel") }
-                    Spacer(Modifier.width(8.dp))
-                    Button(onClick = { runCatching { player.stop() }; onDone(start.toLong(), (start + len).toLong().coerceAtMost(if (durationMs > 1) durationMs else (start + len).toLong())) }, enabled = ready) { Text("Done") }
+    LaunchedEffect(Unit) { lyrics = GatewayClient.getLyrics(song.title, song.artist); lyricsLoaded = true }
+    LaunchedEffect(playing) {
+        while (playing) {
+            posMs = runCatching { player.currentPosition.toLong() }.getOrDefault(posMs)
+            if (posMs >= endMs) { runCatching { player.seekTo(startMs.toInt()) }; posMs = startMs }
+            delay(80)
+        }
+    }
+    val curLyric = lyrics.indexOfLast { it.first <= posMs }
+    Dialog(onDismissRequest = onCancel, properties = DialogProperties(usePlatformDefaultWidth = false)) {
+        Surface(Modifier.fillMaxSize(), color = Color(0xFF0A0A0A)) {
+            Column(Modifier.fillMaxSize().statusBarsPadding().navigationBarsPadding().padding(16.dp)) {
+                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
+                    IconButton(onClick = onCancel) { Icon(Icons.Filled.Close, "close", tint = Color.White) }
+                    Column(Modifier.weight(1f), horizontalAlignment = Alignment.CenterHorizontally) {
+                        Text(song.title, color = Color.White, fontWeight = FontWeight.Bold, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                        Text(song.artist, color = Color.White.copy(alpha = 0.6f), style = MaterialTheme.typography.labelSmall, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                    }
+                    TextButton(onClick = { runCatching { player.stop() }; onDone(startMs, endMs) }, enabled = ready) { Text("Done", color = IOS_BLUE, fontWeight = FontWeight.Bold) }
                 }
+                Box(Modifier.weight(1f).fillMaxWidth(), contentAlignment = Alignment.Center) {
+                    if (!lyricsLoaded) CircularProgressIndicator(color = Color.White)
+                    else if (lyrics.isEmpty()) Text("Lyrics unavailable", color = Color.White.copy(alpha = 0.5f))
+                    else Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                        for (off in -2..2) {
+                            val idx = curLyric + off
+                            if (idx in lyrics.indices) Text(lyrics[idx].second,
+                                color = if (off == 0) Color.White else Color.White.copy(alpha = 0.3f),
+                                fontWeight = if (off == 0) FontWeight.Bold else FontWeight.Normal,
+                                style = if (off == 0) MaterialTheme.typography.titleLarge else MaterialTheme.typography.bodyMedium,
+                                textAlign = TextAlign.Center, maxLines = 2, overflow = TextOverflow.Ellipsis,
+                                modifier = Modifier.padding(vertical = 5.dp, horizontal = 8.dp))
+                        }
+                    }
+                }
+                Row(Modifier.fillMaxWidth().padding(vertical = 6.dp), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
+                    IconButton(onClick = { if (playing) { runCatching { player.pause() }; playing = false } else runCatching { player.seekTo(startMs.toInt()); player.start(); playing = true } }, enabled = ready) {
+                        Icon(if (playing) Icons.Filled.Close else Icons.Filled.PlayArrow, "play", tint = IOS_BLUE)
+                    }
+                    Text(fmtMs(posMs - startMs) + " / " + fmtMs(endMs - startMs), color = Color.White, style = MaterialTheme.typography.labelMedium)
+                }
+                WaveformTrimmer(bars, durationMs, startMs, endMs, posMs) { ns, ne -> startMs = ns; endMs = ne }
+                Spacer(Modifier.height(6.dp))
+                Text("Start " + fmtMs(startMs) + "   •   Length " + fmtMs(endMs - startMs) + "   •   drag the blue handles", color = Color.White.copy(alpha = 0.55f), style = MaterialTheme.typography.labelSmall)
             }
         }
     }
 }
+
+@Composable
+private fun WaveformTrimmer(bars: FloatArray, durationMs: Long, startMs: Long, endMs: Long, posMs: Long, onChange: (Long, Long) -> Unit) {
+    var boxW by remember { mutableStateOf(1f) }
+    Canvas(Modifier.fillMaxWidth().height(72.dp).pointerInput(durationMs) {
+        detectDragGestures(onDrag = { change, _ ->
+            if (durationMs <= 0) return@detectDragGestures
+            val x = change.position.x.coerceIn(0f, boxW)
+            val ms = (x / boxW * durationMs).toLong()
+            val startX = startMs.toFloat() / durationMs * boxW
+            val endX = endMs.toFloat() / durationMs * boxW
+            if (kotlin.math.abs(x - startX) <= kotlin.math.abs(x - endX)) onChange(ms.coerceIn(0L, endMs - 2000L), endMs)
+            else onChange(startMs, ms.coerceIn(startMs + 2000L, durationMs))
+        })
+    }) {
+        boxW = size.width
+        val n = bars.size
+        val barW = size.width / n
+        val startX = if (durationMs > 0) startMs.toFloat() / durationMs * size.width else 0f
+        val endX = if (durationMs > 0) endMs.toFloat() / durationMs * size.width else size.width
+        for (i in 0 until n) {
+            val bx = i * barW
+            val h = bars[i] * size.height
+            val inSel = bx + barW / 2 in startX..endX
+            drawRect(if (inSel) Color(0xFF4EA1FF) else Color.White.copy(alpha = 0.22f),
+                topLeft = androidx.compose.ui.geometry.Offset(bx + 1f, (size.height - h) / 2f),
+                size = androidx.compose.ui.geometry.Size((barW - 2f).coerceAtLeast(1f), h))
+        }
+        drawRect(Color.White, topLeft = androidx.compose.ui.geometry.Offset(startX - 3f, 0f), size = androidx.compose.ui.geometry.Size(6f, size.height))
+        drawRect(Color.White, topLeft = androidx.compose.ui.geometry.Offset(endX - 3f, 0f), size = androidx.compose.ui.geometry.Size(6f, size.height))
+        if (durationMs > 0) {
+            val px = posMs.toFloat() / durationMs * size.width
+            drawRect(Color.Yellow, topLeft = androidx.compose.ui.geometry.Offset(px - 1f, 0f), size = androidx.compose.ui.geometry.Size(2f, size.height))
+        }
+    }
+}
+
+private fun fmtMs(ms: Long): String { val s = (ms / 1000).coerceAtLeast(0); return (s / 60).toString() + ":" + (s % 60).toString().padStart(2, '0') }

@@ -111,6 +111,24 @@ object GatewayClient {
         post("/react", JSONObject().put("jid", jid).put("id", id).put("emoji", emoji).put("fromMe", fromMe)).optBoolean("ok", false)
     }
     data class Song(val title: String, val artist: String, val image: String?, val url: String)
+    // returns synced lyrics as (timeMs, line); empty if none
+    suspend fun getLyrics(title: String, artist: String): List<Pair<Long, String>> = withContext(Dispatchers.IO) {
+        try {
+            val t = java.net.URLEncoder.encode(title, "UTF-8"); val a = java.net.URLEncoder.encode(artist, "UTF-8")
+            val o = get("/music/lyrics?title=$t&artist=$a")
+            val synced = o.optString("synced")
+            if (synced.isBlank()) return@withContext emptyList()
+            val rx = Regex("\\[(\\d+):(\\d+)(?:\\.(\\d+))?\\](.*)")
+            synced.lines().mapNotNull { line ->
+                val m = rx.find(line) ?: return@mapNotNull null
+                val min = m.groupValues[1].toLong(); val sec = m.groupValues[2].toLong()
+                val cs = m.groupValues[3].ifEmpty { "0" }.take(2).padEnd(2, '0').toLong()
+                val ms = min * 60000 + sec * 1000 + cs * 10
+                val text = m.groupValues[4].trim()
+                if (text.isEmpty()) null else ms to text
+            }.sortedBy { it.first }
+        } catch (e: Exception) { emptyList() }
+    }
     suspend fun searchMusic(q: String): Pair<List<Song>, String> = withContext(Dispatchers.IO) {
         try {
             val enc = java.net.URLEncoder.encode(q, "UTF-8")

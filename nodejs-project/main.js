@@ -783,6 +783,27 @@ app.get('/music/search', async (req, res) => {
   } catch (e) { res.json({ items: [], error: (e && e.message) + ' | ' + diag.join('|') }) }
 })
 
+app.get('/music/lyrics', async (req, res) => {
+  try {
+    const title = String(req.query.title || '').trim()
+    const artist = String(req.query.artist || '').trim()
+    if (!title) return res.json({ synced: '', plain: '' })
+    let data = {}
+    try {
+      const body = await httpGet('https://lrclib.net/api/get?track_name=' + encodeURIComponent(title) + '&artist_name=' + encodeURIComponent(artist), { 'User-Agent': 'AyXWhatsApp/1.0', 'Accept': 'application/json' })
+      data = JSON.parse(body)
+    } catch (_) {}
+    if (!data || (!data.syncedLyrics && !data.plainLyrics)) {
+      try {
+        const sbody = await httpGet('https://lrclib.net/api/search?q=' + encodeURIComponent((title + ' ' + artist).trim()), { 'User-Agent': 'AyXWhatsApp/1.0', 'Accept': 'application/json' })
+        const arr = JSON.parse(sbody)
+        if (Array.isArray(arr) && arr.length) data = arr.find(x => x.syncedLyrics) || arr[0]
+      } catch (_) {}
+    }
+    res.json({ synced: (data && data.syncedLyrics) || '', plain: (data && data.plainLyrics) || '' })
+  } catch (e) { res.json({ synced: '', plain: '' }) }
+})
+
 app.post('/status/post', async (req, res) => {
   try {
     if (!sock) return res.status(409).json({ error: 'not connected' })
