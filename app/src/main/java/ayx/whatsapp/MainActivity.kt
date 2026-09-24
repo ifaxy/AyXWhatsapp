@@ -1370,19 +1370,21 @@ private fun StatusScreen(statuses: List<GatewayClient.StatusItem>, onOpen: (Gate
             HorizontalDivider()
             if (others.isNotEmpty()) Text("Recent updates", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.padding(start = 14.dp, top = 10.dp, bottom = 2.dp))
         }
-        itemsIndexed(others) { _, st ->
-            Row(Modifier.fillMaxWidth().clickable { onOpen(st) }.padding(horizontal = 12.dp, vertical = 10.dp), verticalAlignment = Alignment.CenterVertically) {
-                Avatar(st.sender, st.name, dpCache, 50.dp)
+        val otherGroups = others.groupBy { it.sender }.entries.sortedByDescending { e -> e.value.maxOf { it.ts } }
+        itemsIndexed(otherGroups.toList()) { _, entry ->
+            val list = entry.value
+            val latest = list.maxByOrNull { it.ts } ?: list.first()
+            Row(Modifier.fillMaxWidth().clickable { onOpen(latest) }.padding(horizontal = 12.dp, vertical = 10.dp), verticalAlignment = Alignment.CenterVertically) {
+                Avatar(entry.key, latest.name, dpCache, 50.dp)
                 Spacer(Modifier.width(12.dp))
                 Column(Modifier.weight(1f)) {
-                    Text(st.name.ifBlank { "Status" }, style = MaterialTheme.typography.bodyLarge, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                    Text(if (st.mediaType != null) ("photo/video") else st.text.ifBlank { "status" }, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                    Text(ContactStore.nameFor(entry.key) ?: latest.name.ifBlank { "Status" }, style = MaterialTheme.typography.bodyLarge, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                    Text(list.size.toString() + " update(s) · " + fmt(latest.ts), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 1, overflow = TextOverflow.Ellipsis)
                 }
-                Text(fmt(st.ts), style = MaterialTheme.typography.labelSmall)
             }
             HorizontalDivider()
         }
-        if (others.isEmpty()) item { Box(Modifier.fillMaxWidth().padding(24.dp), contentAlignment = Alignment.Center) { Text("No recent updates", color = MaterialTheme.colorScheme.onSurfaceVariant) } }
+        if (otherGroups.isEmpty()) item { Box(Modifier.fillMaxWidth().padding(24.dp), contentAlignment = Alignment.Center) { Text("No recent updates", color = MaterialTheme.colorScheme.onSurfaceVariant) } }
     }
 }
 

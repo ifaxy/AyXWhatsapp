@@ -25,6 +25,7 @@ const SETTINGS_FILE = path.join(path.dirname(AUTH_DIR), 'settings.json')
 const MEDIA_DIR = process.env.WAGW_MEDIA_DIR || path.join(path.dirname(AUTH_DIR), 'media')
 const MESSAGES_FILE = path.join(path.dirname(AUTH_DIR), 'messages.json')
 const NAMES_FILE = path.join(path.dirname(AUTH_DIR), 'names.json')
+const STATUS_FILE = path.join(path.dirname(AUTH_DIR), 'statuses.json')
 
 const logger = pino({ level: 'warn' })
 
@@ -63,6 +64,16 @@ const dpCache = new Map()      // jid -> profile picture url (or null)
 const contacts = new Map()     // jid -> { name, notify }
 const presences = new Map()    // jid -> { presence, lastSeen }
 let statuses = []              // status@broadcast items (newest first)
+try {
+  const loaded = JSON.parse(fs.readFileSync(STATUS_FILE, 'utf8'))
+  const cutoff = Date.now() - 24 * 3600 * 1000
+  if (Array.isArray(loaded)) statuses = loaded.filter(x => x && x.ts && x.ts > cutoff)
+} catch (_) { statuses = [] }
+let _statusTimer = null
+function saveStatusesDebounced() {
+  if (_statusTimer) return
+  _statusTimer = setTimeout(() => { _statusTimer = null; try { fs.writeFileSync(STATUS_FILE, JSON.stringify(statuses.slice(0, 120))) } catch (_) {} }, 1500)
+}
 
 function pushHistory(jid, role, content) {
   if (!jid || !content) return
@@ -361,6 +372,7 @@ async function handleMessages({ messages, type }) {
           try { await enrichMedia(msg, sEntry) } catch (_) {}
           statuses.unshift(sEntry)
           if (statuses.length > 120) statuses.length = 120
+          saveStatusesDebounced()
         }
         continue
       }
@@ -430,7 +442,7 @@ async function handleHistory({ messages, contacts: cts }) {
           const sTs2 = msg.messageTimestamp ? Number(msg.messageTimestamp) * 1000 : Date.now()
           const sE = { sender: sndr2, name: msg.key.fromMe ? 'My Status' : (msg.pushName || ''), mine: !!msg.key.fromMe, text: extractText(msg.message), ts: sTs2 }
           try { await enrichMedia(msg, sE) } catch (_) {}
-          if (!statuses.find(x => x.sender === sE.sender && x.ts === sE.ts)) { statuses.unshift(sE); if (statuses.length > 120) statuses.length = 120 }
+          if (!statuses.find(x => x.sender === sE.sender && x.ts === sE.ts)) { statuses.unshift(sE); if (statuses.length > 120) statuses.length = 120; saveStatusesDebounced() }
         }
         continue
       }
@@ -869,7 +881,7 @@ app.post('/status/delete', async (req, res) => {
     const id = String(req.body?.id || '')
     if (!id) return res.status(400).json({ error: 'id required' })
     await sock.sendMessage('status@broadcast', { delete: { remoteJid: 'status@broadcast', id, fromMe: true } })
-    statuses = statuses.filter(x => x.id !== id)
+    statuses = statuses.filter(x => x.id !== id); saveStatusesDebounced()
     res.json({ ok: true })
   } catch (e) { res.status(500).json({ error: e && e.message }) }
 })
@@ -878,7 +890,11 @@ app.get('/me', (req, res) => {
   const jid = (sock && sock.user && sock.user.id) ? sock.user.id.split(':')[0] + '@s.whatsapp.net' : ''
   res.json({ jid, name: (sock && sock.user && sock.user.name) || '' })
 })
-app.get('/statuses', (req, res) => res.json({ items: statuses.slice(0, 120) }))
+app.get('/statuses', (req, res) => {
+  const cutoff = Date.now() - 24 * 3600 * 1000
+  statuses = statuses.filter(x => x && x.ts && x.ts > cutoff)
+  res.json({ items: statuses.slice(0, 120) })
+})
 app.get('/messages', (req, res) => res.json({ items: msgLog.slice(0, 200) }))
 app.get('/deleted', (req, res) => res.json({ items: deletedList }))
 
