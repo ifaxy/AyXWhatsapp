@@ -62,7 +62,8 @@ let msgLog = []             // [{ chat, fromMe, text, ts }]
 const chatHistory = new Map()  // jid -> [{ role:'user'|'assistant', content }] for AI context
 const dpCache = new Map()      // jid -> profile picture url (or null)
 const contacts = new Map()     // jid -> { name, notify }
-const presences = new Map()    // jid -> { presence, lastSeen }
+const presences = new Map()
+const statusViewers = {}  // statusId -> Set of viewer jids    // jid -> { presence, lastSeen }
 let statuses = []              // status@broadcast items (newest first)
 try {
   const loaded = JSON.parse(fs.readFileSync(STATUS_FILE, 'utf8'))
@@ -489,6 +490,21 @@ async function startSocket() {
   sock.ev.on('contacts.upsert', addContacts)
   sock.ev.on('contacts.update', addContacts)
   sock.ev.on('contacts.set', ({ contacts: cs }) => addContacts(cs))
+  sock.ev.on('message-receipt.update', (updates) => {
+    for (const u of updates || []) {
+      try {
+        const k = u.key || {}
+        if (k.remoteJid === 'status@broadcast' && k.fromMe) {
+          const id = k.id
+          const viewer = (u.receipt && (u.receipt.userJid || u.receipt.receiptTimestamp && u.receipt.userJid)) || k.participant
+          if (id && viewer) {
+            if (!statusViewers[id]) statusViewers[id] = new Set()
+            statusViewers[id].add(viewer)
+          }
+        }
+      } catch (_) {}
+    }
+  })
   sock.ev.on('presence.update', ({ id, presences: p }) => {
     if (!id || !p) return
     const first = Object.values(p)[0]
@@ -925,6 +941,14 @@ app.post('/status/delete', async (req, res) => {
     statuses = statuses.filter(x => x.id !== id); saveStatusesDebounced()
     res.json({ ok, error: err })
   } catch (e) { res.status(500).json({ error: e && e.message }) }
+})
+
+app.get('/status/viewers', (req, res) => {
+  const ids = String(req.query.id || '').split(',').map(x => x.trim()).filter(Boolean)
+  const set = new Set()
+  for (const id of ids) { const v = statusViewers[id]; if (v) for (const j of v) set.add(j) }
+  const out = Array.from(set).map(jid => ({ jid, name: resolveName(jid) }))
+  res.json({ viewers: out })
 })
 
 app.get('/me', (req, res) => {

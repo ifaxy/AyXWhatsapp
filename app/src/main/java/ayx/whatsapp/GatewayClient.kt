@@ -240,6 +240,15 @@ object GatewayClient {
     suspend fun deleteStatus(id: String): Boolean = withContext(Dispatchers.IO) {
         post("/status/delete", JSONObject().put("id", id)).optBoolean("ok", false)
     }
+    // who viewed my status (jid to display name)
+    suspend fun getStatusViewers(ids: List<String>): List<Pair<String, String>> = withContext(Dispatchers.IO) {
+        try {
+            if (ids.isEmpty()) return@withContext emptyList()
+            val idParam = java.net.URLEncoder.encode(ids.joinToString(","), "UTF-8")
+            val arr = get("/status/viewers?id=$idParam").optJSONArray("viewers") ?: return@withContext emptyList()
+            (0 until arr.length()).map { val o = arr.getJSONObject(it); o.optString("jid") to o.optString("name") }
+        } catch (e: Exception) { emptyList() }
+    }
     suspend fun getMe(): String = withContext(Dispatchers.IO) {
         try { get("/me").optString("jid") } catch (e: Exception) { "" }
     }

@@ -38,6 +38,7 @@ import androidx.compose.foundation.gestures.detectDragGestures
 import androidx.compose.foundation.Canvas
 import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.foundation.gestures.detectTransformGestures
+import androidx.compose.foundation.gestures.detectVerticalDragGestures
 import androidx.compose.ui.BiasAlignment
 import androidx.compose.ui.unit.sp
 import androidx.compose.animation.AnimatedContent
@@ -588,10 +589,9 @@ fun GatewayApp() {
             onDownload = { st -> downloadMedia(scope, ctx, GatewayClient.Msg(st.sender, "", false, st.text, st.ts, st.mediaName, st.mediaType)) { m -> notify(m) } },
             onReply = { jid, text -> scope.launch { runCatching { GatewayClient.sendToJid(jid, text) }.onSuccess { notify("reply sent") }.onFailure { notify("reply failed: " + it.message) } } },
             onDeleteStatus = { id -> scope.launch {
-                        val ok = GatewayClient.deleteStatus(id)
-                        StatusData.remove(id)
+                        val res = StatusDl.deleteEverywhere(id)
                         statuses = statuses.filterNot { it.id == id }
-                        notify(if (ok) "status deleted ✓" else "delete sent to WhatsApp")
+                        notify(res.second)
                     } },
             onClose = { storyView = null })
     }
@@ -1608,6 +1608,9 @@ private fun StatusViewer(statuses: List<GatewayClient.StatusItem>, startSender: 
     fun goPrev() { if (ii > 0) ii-- else if (si > 0) { si--; ii = 0 } }
     var replyText by remember { mutableStateOf("") }
     var progress by remember(si, ii) { mutableStateOf(0f) }
+    var confirmDelete by remember { mutableStateOf<String?>(null) }
+    var showViewers by remember { mutableStateOf(false) }
+    val myMine = items.first().mine
 
     var bmp by remember(st.mediaName, si, ii) { mutableStateOf<ImageBitmap?>(null) }
     LaunchedEffect(st.mediaName, si, ii) {
@@ -1632,7 +1635,9 @@ private fun StatusViewer(statuses: List<GatewayClient.StatusItem>, startSender: 
 
     Dialog(onDismissRequest = onClose, properties = DialogProperties(usePlatformDefaultWidth = false)) {
         Surface(Modifier.fillMaxSize(), color = Color.Black) {
-            Box(Modifier.fillMaxSize()) {
+            Box(Modifier.fillMaxSize().pointerInput(myMine) {
+                if (myMine) { var dyAcc = 0f; detectVerticalDragGestures(onDragEnd = { if (dyAcc < -80f) showViewers = true; dyAcc = 0f }) { _, dy -> dyAcc += dy } }
+            }) {
                 if (st.mediaType == "video" && st.mediaName != null) {
                     key(si, ii, st.mediaName) {
                         AndroidView(factory = { c -> VideoView(c).apply { setVideoURI(Uri.parse(GatewayClient.mediaUrl(st.mediaName!!))); setOnPreparedListener { it.start() }; setOnCompletionListener { goNext() } } }, modifier = Modifier.fillMaxSize())
@@ -1660,12 +1665,20 @@ private fun StatusViewer(statuses: List<GatewayClient.StatusItem>, startSender: 
                         Avatar(group.first, group.first.substringBefore("@"), dpCache, 36.dp)
                         Spacer(Modifier.width(10.dp))
                         Text(if (items.first().mine) "My Status" else (ContactStore.nameFor(group.first) ?: items.first().name.ifBlank { "Status" }), color = Color.White, fontWeight = FontWeight.Bold, maxLines = 1, modifier = Modifier.weight(1f))
-                        if (items.first().mine && st.id != null) IconButton(onClick = { onDeleteStatus(st.id!!); onClose() }) { Icon(Icons.Filled.Delete, "delete", tint = Color.White) }
+                        if (myMine && st.id != null) IconButton(onClick = { confirmDelete = st.id }) { Icon(Icons.Filled.Delete, "delete", tint = Color.White) }
                         if (st.mediaName != null) IconButton(onClick = { onDownload(st) }) { Icon(Icons.Filled.Download, "download", tint = Color.White) }
                         IconButton(onClick = onClose) { Icon(Icons.Filled.Close, "close", tint = Color.White) }
                     }
                 }
-                if (!items.first().mine) {
+                if (myMine) {
+                    Column(Modifier.align(Alignment.BottomCenter).navigationBarsPadding().padding(bottom = 18.dp)
+                        .clickable(interactionSource = remember { MutableInteractionSource() }, indication = null) { showViewers = true },
+                        horizontalAlignment = Alignment.CenterHorizontally) {
+                        Icon(Icons.Filled.KeyboardArrowUp, null, tint = Color.White)
+                        Text("Viewed by", color = Color.White, style = MaterialTheme.typography.labelMedium)
+                    }
+                }
+                if (!myMine) {
                     Row(Modifier.align(Alignment.BottomCenter).fillMaxWidth().navigationBarsPadding().imePadding().padding(10.dp), verticalAlignment = Alignment.CenterVertically) {
                         OutlinedTextField(replyText, { replyText = it }, placeholder = { Text("Reply to status…", color = Color.White.copy(alpha = 0.6f)) }, singleLine = true, shape = RoundedCornerShape(26.dp),
                             colors = OutlinedTextFieldDefaults.colors(focusedBorderColor = Color.White.copy(alpha = 0.4f), unfocusedBorderColor = Color.White.copy(alpha = 0.25f),
@@ -1676,6 +1689,14 @@ private fun StatusViewer(statuses: List<GatewayClient.StatusItem>, startSender: 
                         FilledIconButton(onClick = { if (replyText.isNotBlank()) { onReply(group.first, replyText.trim()); replyText = "" } }, enabled = replyText.isNotBlank()) { Icon(Icons.AutoMirrored.Filled.Send, "send") }
                     }
                 }
+                confirmDelete?.let { id ->
+                    AlertDialog(onDismissRequest = { confirmDelete = null },
+                        title = { Text("Delete status?") },
+                        text = { Text("This will delete it from your WhatsApp and from this app.") },
+                        confirmButton = { TextButton(onClick = { confirmDelete = null; onDeleteStatus(id); onClose() }) { Text("Delete", color = Color(0xFFFF3B30)) } },
+                        dismissButton = { TextButton(onClick = { confirmDelete = null }) { Text("Cancel") } })
+                }
+                if (showViewers) StatusViewersSheet(items.filter { it.mine }.mapNotNull { it.id }, onClose = { showViewers = false })
             }
         }
     }
