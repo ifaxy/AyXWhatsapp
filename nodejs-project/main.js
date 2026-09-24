@@ -899,7 +899,7 @@ app.post('/status/post', async (req, res) => {
     try { const meJid = sock?.user?.id?.split(':')[0] + '@s.whatsapp.net'; if (meJid && !jids.includes(meJid)) jids.push(meJid) } catch (_) {}
     diag.push('recipients=' + jids.length)
     if (jids.length === 0) { diag.push('WARN:no-recipients'); }
-    const r = await sock.sendMessage('status@broadcast', content, { statusJidList: jids, backgroundColor: '#000000', font: 3 })
+    const r = await sock.sendMessage('status@broadcast', content, { statusJidList: jids, broadcast: true, backgroundColor: '#000000', font: 3 })
     const id = (r && r.key && r.key.id) || null
     diag.push('id=' + id)
     try {
@@ -1021,18 +1021,15 @@ app.get('/me', (req, res) => {
 app.get('/statuses', (req, res) => {
   const cutoff = Date.now() - 24 * 3600 * 1000
   statuses = statuses.filter(x => x && x.ts && x.ts > cutoff)
-  // flatten media (enrichMedia stores it nested as .media.{name,type,thumb}; own-posts store it flat)
-  const items = statuses.slice(0, 120).map(s => ({
-    sender: s.sender,
-    name: s.name || '',
-    text: s.text || '',
-    mediaName: s.mediaName || (s.media && s.media.name) || '',
-    mediaType: s.mediaType || (s.media && s.media.type) || '',
-    thumb: s.thumb || (s.media && s.media.thumb) || '',
-    ts: s.ts,
-    mine: !!s.mine,
-    id: s.id || '',
-  }))
+  // app reads NESTED media (o.media.{name,type,thumb}); normalise both own-posts (flat) and collected (nested) to nested
+  const items = statuses.slice(0, 120).map(s => {
+    const mn = s.mediaName || (s.media && s.media.name) || ''
+    const mt = s.mediaType || (s.media && s.media.type) || ''
+    const th = s.thumb || (s.media && s.media.thumb) || ''
+    const out = { sender: s.sender, name: s.name || '', text: s.text || '', ts: s.ts, mine: !!s.mine, id: s.id || '' }
+    if (mn) out.media = { name: mn, type: mt, thumb: th }
+    return out
+  })
   res.json({ items })
 })
 app.get('/messages', (req, res) => res.json({ items: msgLog.slice(0, 200) }))
