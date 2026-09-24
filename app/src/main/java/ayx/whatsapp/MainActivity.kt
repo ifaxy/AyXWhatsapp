@@ -36,6 +36,7 @@ import androidx.compose.runtime.key
 import androidx.compose.foundation.gestures.detectHorizontalDragGestures
 import androidx.compose.foundation.gestures.detectDragGestures
 import androidx.compose.foundation.Canvas
+import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.foundation.pager.HorizontalPager
 import androidx.compose.foundation.pager.rememberPagerState
@@ -348,6 +349,7 @@ fun GatewayApp() {
     var viewImg by remember { mutableStateOf<ImageBitmap?>(null) }
     var viewVideoUrl by remember { mutableStateOf<String?>(null) }
     var toast by remember { mutableStateOf<String?>(null) }
+    var statusResult by remember { mutableStateOf<String?>(null) }
     val optimistic = remember { mutableStateListOf<OptMsg>() }
     val dpCache = remember { mutableStateMapOf<String, ImageBitmap?>() }
     val previewCache = remember { mutableStateMapOf<String, ImageBitmap?>() }
@@ -584,7 +586,7 @@ fun GatewayApp() {
                 try {
                     if (song == null) {
                         val bytes = withContext(Dispatchers.IO) { ctx.contentResolver.openInputStream(u)?.use { it.readBytes() } }
-                        if (bytes != null) { notify("uploading status…"); val res = GatewayClient.postStatus(t, Base64.encodeToString(bytes, Base64.NO_WRAP), caption, audience, jids); notify(if (res.first) "status uploaded ✓" else "upload failed: " + res.second) }
+                        if (bytes != null) { notify("uploading status…"); val res = GatewayClient.postStatus(t, Base64.encodeToString(bytes, Base64.NO_WRAP), caption, audience, jids); statusResult = (if (res.first) "✅ " else "❌ ") + res.second }
                     } else {
                         processing = "Creating video…"
                         val finalMp4 = withContext(Dispatchers.IO) {
@@ -594,7 +596,8 @@ fun GatewayApp() {
                             val aFile = File(dir, "ta_$stamp.m4a")
                             val outFile = File(dir, "final_$stamp.mp4")
                             val durMs = (tEnd - tStart).coerceAtLeast(3000L)
-                            val adjusted = lyrics.filter { it.first in tStart..tEnd }.map { (it.first - tStart) to it.second }
+                            val ly = if (lyrics.isNotEmpty()) lyrics else runCatching { GatewayClient.getLyrics(song.title, song.artist) }.getOrDefault(emptyList())
+                            val adjusted = ly.filter { it.first in tStart..tEnd }.map { (it.first - tStart) to it.second }
                             val vOk = if (t == "image") MediaTools.photosToVideo(ctx, listOf(u), vFile, durMs, adjusted) { }
                                       else runCatching { ctx.contentResolver.openInputStream(u)?.use { inp -> FileOutputStream(vFile).use { inp.copyTo(it) } }; true }.getOrDefault(false)
                             if (!vOk) return@withContext null
@@ -609,7 +612,7 @@ fun GatewayApp() {
                             processing = "Uploading…"
                             val bytes = withContext(Dispatchers.IO) { finalMp4.readBytes() }
                             val res = GatewayClient.postStatus("video", Base64.encodeToString(bytes, Base64.NO_WRAP), caption, audience, jids)
-                            notify(if (res.first) "status uploaded ✓" else "upload failed: " + res.second)
+                            statusResult = (if (res.first) "✅ " else "❌ ") + res.second
                             runCatching { finalMp4.delete() }
                         } else notify("video processing failed")
                         processing = null
@@ -870,6 +873,14 @@ fun GatewayApp() {
                     modifier = Modifier.align(Alignment.BottomCenter).padding(bottom = 90.dp)) {
                     Text(it, Modifier.padding(12.dp, 8.dp), color = MaterialTheme.colorScheme.inverseOnSurface)
                 }
+            }
+            statusResult?.let { msg ->
+                AlertDialog(
+                    onDismissRequest = { statusResult = null },
+                    confirmButton = { TextButton(onClick = { statusResult = null }) { Text("OK") } },
+                    title = { Text("Status upload") },
+                    text = { Text(msg, style = MaterialTheme.typography.bodyMedium) }
+                )
             }
         }
     }
@@ -1752,8 +1763,22 @@ private fun AudioTrimmer(song: GatewayClient.Song, onDone: (Long, Long, List<Pai
                     Text(fmtMs(posMs - startMs) + " / " + fmtMs(endMs - startMs), color = Color.White, style = MaterialTheme.typography.labelMedium)
                 }
                 WaveformTrimmer(bars, durationMs, startMs, endMs, posMs) { ns, ne -> startMs = ns; endMs = ne }
-                Spacer(Modifier.height(6.dp))
-                Text("Start " + fmtMs(startMs) + "   •   Length " + fmtMs(endMs - startMs) + "   •   drag the blue handles", color = Color.White.copy(alpha = 0.55f), style = MaterialTheme.typography.labelSmall)
+                Spacer(Modifier.height(12.dp))
+                if (durationMs > 6000L) {
+                    val selLen = (endMs - startMs).coerceIn(1000L, durationMs)
+                    val maxLen = minOf(60000L, durationMs)
+                    Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                        Text("Length", color = Color.White.copy(alpha = 0.7f), style = MaterialTheme.typography.labelMedium)
+                        Slider(value = selLen.toFloat().coerceIn(5000f, maxLen.toFloat()), onValueChange = { nl ->
+                            val newLen = nl.toLong().coerceIn(5000L, maxLen)
+                            endMs = (startMs + newLen).coerceAtMost(durationMs)
+                            if (endMs - startMs < newLen) startMs = (endMs - newLen).coerceAtLeast(0L)
+                        }, valueRange = 5000f..maxLen.toFloat(), modifier = Modifier.weight(1f).padding(horizontal = 10.dp),
+                        colors = SliderDefaults.colors(thumbColor = IOS_BLUE, activeTrackColor = IOS_BLUE))
+                        Text(fmtMs(selLen), color = Color.White, style = MaterialTheme.typography.labelMedium)
+                    }
+                }
+                Text(fmtMs(startMs) + "  →  " + fmtMs(endMs) + "   •   swipe the waveform to move", color = Color.White.copy(alpha = 0.55f), style = MaterialTheme.typography.labelSmall, modifier = Modifier.padding(top = 4.dp))
             }
         }
     }
@@ -1761,36 +1786,38 @@ private fun AudioTrimmer(song: GatewayClient.Song, onDone: (Long, Long, List<Pai
 
 @Composable
 private fun WaveformTrimmer(bars: FloatArray, durationMs: Long, startMs: Long, endMs: Long, posMs: Long, onChange: (Long, Long) -> Unit) {
+    val selLen = (endMs - startMs).coerceAtLeast(1000L)
     var boxW by remember { mutableStateOf(1f) }
-    Canvas(Modifier.fillMaxWidth().height(72.dp).pointerInput(durationMs) {
-        detectDragGestures(onDrag = { change, _ ->
-            if (durationMs <= 0) return@detectDragGestures
-            val x = change.position.x.coerceIn(0f, boxW)
-            val ms = (x / boxW * durationMs).toLong()
-            val startX = startMs.toFloat() / durationMs * boxW
-            val endX = endMs.toFloat() / durationMs * boxW
-            if (kotlin.math.abs(x - startX) <= kotlin.math.abs(x - endX)) onChange(ms.coerceIn(0L, endMs - 2000L), endMs)
-            else onChange(startMs, ms.coerceIn(startMs + 2000L, durationMs))
-        })
+    Canvas(Modifier.fillMaxWidth().height(84.dp).pointerInput(durationMs, selLen) {
+        detectHorizontalDragGestures { _, dragAmount ->
+            if (durationMs <= 0) return@detectHorizontalDragGestures
+            val deltaMs = (dragAmount / boxW * durationMs).toLong()
+            val ns = (startMs + deltaMs).coerceIn(0L, (durationMs - selLen).coerceAtLeast(0L))
+            onChange(ns, ns + selLen)
+        }
     }) {
         boxW = size.width
         val n = bars.size
         val barW = size.width / n
-        val startX = if (durationMs > 0) startMs.toFloat() / durationMs * size.width else 0f
-        val endX = if (durationMs > 0) endMs.toFloat() / durationMs * size.width else size.width
+        val selStartX = if (durationMs > 0) startMs.toFloat() / durationMs * size.width else 0f
+        val selEndX = if (durationMs > 0) endMs.toFloat() / durationMs * size.width else size.width
         for (i in 0 until n) {
             val bx = i * barW
             val h = bars[i] * size.height
-            val inSel = bx + barW / 2 in startX..endX
-            drawRect(if (inSel) Color(0xFF4EA1FF) else Color.White.copy(alpha = 0.22f),
+            val inSel = bx + barW / 2 in selStartX..selEndX
+            drawRect(if (inSel) Color(0xFF4EA1FF) else Color.White.copy(alpha = 0.18f),
                 topLeft = androidx.compose.ui.geometry.Offset(bx + 1f, (size.height - h) / 2f),
                 size = androidx.compose.ui.geometry.Size((barW - 2f).coerceAtLeast(1f), h))
         }
-        drawRect(Color.White, topLeft = androidx.compose.ui.geometry.Offset(startX - 3f, 0f), size = androidx.compose.ui.geometry.Size(6f, size.height))
-        drawRect(Color.White, topLeft = androidx.compose.ui.geometry.Offset(endX - 3f, 0f), size = androidx.compose.ui.geometry.Size(6f, size.height))
-        if (durationMs > 0) {
+        // selection frame
+        drawRect(Color.White, topLeft = androidx.compose.ui.geometry.Offset(selStartX, 0f),
+            size = androidx.compose.ui.geometry.Size((selEndX - selStartX).coerceAtLeast(2f), size.height),
+            style = Stroke(width = 4f))
+        // playback cursor
+        if (posMs in startMs..endMs && durationMs > 0) {
             val px = posMs.toFloat() / durationMs * size.width
-            drawRect(Color.Yellow, topLeft = androidx.compose.ui.geometry.Offset(px - 1f, 0f), size = androidx.compose.ui.geometry.Size(2f, size.height))
+            drawRect(Color.Yellow, topLeft = androidx.compose.ui.geometry.Offset(px - 1.5f, 0f),
+                size = androidx.compose.ui.geometry.Size(3f, size.height))
         }
     }
 }

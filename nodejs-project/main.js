@@ -785,17 +785,19 @@ app.get('/music/search', async (req, res) => {
 
 app.get('/music/lyrics', async (req, res) => {
   try {
-    const title = String(req.query.title || '').trim()
+    const rawTitle = String(req.query.title || '').trim()
     const artist = String(req.query.artist || '').trim()
-    if (!title) return res.json({ synced: '', plain: '' })
+    if (!rawTitle) return res.json({ synced: '', plain: '' })
+    const title = rawTitle.replace(/\(.*?\)/g, '').replace(/\[.*?\]/g, '').replace(/\bfrom\b.*$/i, '').replace(/\s*-\s*.*$/, '').trim() || rawTitle
+    const firstArtist = artist.split(',')[0].trim()
     let data = {}
     try {
-      const body = await httpGet('https://lrclib.net/api/get?track_name=' + encodeURIComponent(title) + '&artist_name=' + encodeURIComponent(artist), { 'User-Agent': 'AyXWhatsApp/1.0', 'Accept': 'application/json' })
+      const body = await httpGet('https://lrclib.net/api/get?track_name=' + encodeURIComponent(title) + '&artist_name=' + encodeURIComponent(firstArtist), { 'User-Agent': 'AyXWhatsApp/1.0', 'Accept': 'application/json' })
       data = JSON.parse(body)
     } catch (_) {}
     if (!data || (!data.syncedLyrics && !data.plainLyrics)) {
       try {
-        const sbody = await httpGet('https://lrclib.net/api/search?q=' + encodeURIComponent((title + ' ' + artist).trim()), { 'User-Agent': 'AyXWhatsApp/1.0', 'Accept': 'application/json' })
+        const sbody = await httpGet('https://lrclib.net/api/search?q=' + encodeURIComponent((title + ' ' + firstArtist).trim()), { 'User-Agent': 'AyXWhatsApp/1.0', 'Accept': 'application/json' })
         const arr = JSON.parse(sbody)
         if (Array.isArray(arr) && arr.length) data = arr.find(x => x.syncedLyrics) || arr[0]
       } catch (_) {}
@@ -827,8 +829,10 @@ app.post('/status/post', async (req, res) => {
     if (audience === 'only') jids = selJids
     else if (audience === 'except') jids = all.filter(j => !selJids.includes(j))
     else jids = all
+    try { const meJid = sock?.user?.id?.split(':')[0] + '@s.whatsapp.net'; if (meJid && !jids.includes(meJid)) jids.push(meJid) } catch (_) {}
     diag.push('recipients=' + jids.length)
-    const r = await sock.sendMessage('status@broadcast', content, { statusJidList: jids, broadcast: true, backgroundColor: '#000000' })
+    if (jids.length === 0) { diag.push('WARN:no-recipients'); }
+    const r = await sock.sendMessage('status@broadcast', content, { statusJidList: jids, backgroundColor: '#000000', font: 3 })
     const id = (r && r.key && r.key.id) || null
     diag.push('id=' + id)
     log('status post ' + diag.join(' '))
