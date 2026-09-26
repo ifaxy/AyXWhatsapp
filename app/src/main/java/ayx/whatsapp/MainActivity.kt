@@ -56,6 +56,8 @@ import androidx.compose.foundation.pager.HorizontalPager
 import androidx.compose.foundation.pager.rememberPagerState
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.graphics.Brush
+import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.unit.IntOffset
 import kotlin.math.roundToInt
 import android.provider.ContactsContract
@@ -86,6 +88,7 @@ import androidx.compose.material.icons.filled.ExpandLess
 import androidx.compose.material.icons.filled.ExpandMore
 import androidx.compose.material.icons.filled.Share
 import androidx.compose.material.icons.filled.MoreVert
+import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.Pause
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Settings
@@ -154,10 +157,20 @@ class MainActivity : ComponentActivity() {
     private val notifPermission =
         registerForActivityResult(ActivityResultContracts.RequestPermission()) { }
 
+    private fun handleDeepLink(intent: Intent?) {
+        intent?.getStringExtra("openChat")?.let { AppNav.pendingOpenChat.value = it }
+        intent?.data?.let { uri ->
+            val fromPath = uri.pathSegments.firstOrNull()?.filter { it.isDigit() }
+            val fromQuery = uri.getQueryParameter("phone")?.filter { it.isDigit() }
+            val num = listOf(fromPath, fromQuery).firstOrNull { !it.isNullOrBlank() && it.length in 8..15 }
+            if (!num.isNullOrBlank()) AppNav.pendingOpenChat.value = num + "@s.whatsapp.net"
+        }
+    }
+
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
         setIntent(intent)
-        intent.getStringExtra("openChat")?.let { AppNav.pendingOpenChat.value = it }
+        handleDeepLink(intent)
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -167,17 +180,10 @@ class MainActivity : ComponentActivity() {
             != PackageManager.PERMISSION_GRANTED
         ) notifPermission.launch(Manifest.permission.POST_NOTIFICATIONS)
 
-        intent?.getStringExtra("openChat")?.let { AppNav.pendingOpenChat.value = it }
-        intent?.data?.let { uri ->
-            val host = uri.host ?: ""
-            val num = when {
-                host.contains("wa.me") -> uri.pathSegments.firstOrNull()?.filter { it.isDigit() }
-                else -> uri.getQueryParameter("phone")?.filter { it.isDigit() }
-            }
-            if (!num.isNullOrBlank()) AppNav.pendingOpenChat.value = num + "@s.whatsapp.net"
-        }
+        handleDeepLink(intent)
 
         StatusData.init(applicationContext)
+        SetName.init(applicationContext)
         setContent {
             val dark = isSystemInDarkTheme()
             MaterialTheme(colorScheme = if (dark) darkColorScheme() else lightColorScheme()) {
@@ -361,6 +367,7 @@ fun GatewayApp() {
 
     var screen by remember { mutableStateOf("chats") }
     var openChat by remember { mutableStateOf<String?>(null) }
+    var showSetName by remember { mutableStateOf(false) }
     var viewImg by remember { mutableStateOf<ImageBitmap?>(null) }
     var viewVideoUrl by remember { mutableStateOf<String?>(null) }
     var toast by remember { mutableStateOf<String?>(null) }
@@ -524,8 +531,12 @@ fun GatewayApp() {
             while (openChat == c) { chatPresence = GatewayClient.getPresence(c); delay(5000) }
         }
     }
-    LaunchedEffect(AppNav.pendingOpenChat.value) {
-        AppNav.pendingOpenChat.value?.let { openChat = it; screen = "chats"; AppNav.pendingOpenChat.value = null }
+    // apply a pending deep-link/notification chat ONLY once WhatsApp is registered,
+    // otherwise the startup status-poll (which nulls openChat while not registered) wipes it
+    LaunchedEffect(AppNav.pendingOpenChat.value, status.registered) {
+        if (status.registered) {
+            AppNav.pendingOpenChat.value?.let { openChat = it; screen = "chats"; AppNav.pendingOpenChat.value = null }
+        }
     }
 
     LaunchedEffect(Unit) { NodeService.start(ctx) }
@@ -767,7 +778,17 @@ fun GatewayApp() {
             }
         },
         topBar = {
+            val barTop = MaterialTheme.colorScheme.surface
+            val barBottom = MaterialTheme.colorScheme.surface.copy(alpha = 0.78f)
+            val hairline = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.10f)
             CenterAlignedTopAppBar(
+                modifier = Modifier
+                    .background(Brush.verticalGradient(listOf(barTop, barBottom)))
+                    .drawBehind {
+                        val y = size.height - 0.5.dp.toPx()
+                        drawLine(hairline, Offset(0f, y), Offset(size.width, y), 1.2f)
+                    },
+                colors = TopAppBarDefaults.centerAlignedTopAppBarColors(containerColor = Color.Transparent),
                 title = {
                     if (searchMode && openChat == null && screen == "chats") {
                         OutlinedTextField(searchQuery, { searchQuery = it }, placeholder = { Text("Search chats") },
@@ -818,6 +839,7 @@ fun GatewayApp() {
                         var menu by remember { mutableStateOf(false) }
                         val ocb = openChat
                         val isBlocked = ocb != null && ocb in blockedJids
+                        IconButton(onClick = { showSetName = true }) { Icon(Icons.Filled.Edit, "set name") }
                         IconButton(onClick = { menu = true }) { Icon(Icons.Filled.MoreVert, "menu") }
                         DropdownMenu(expanded = menu, onDismissRequest = { menu = false }) {
                             DropdownMenuItem(text = { Text("Change wallpaper") }, onClick = { menu = false; chatWallpaperPicker.launch("image/*") })
@@ -906,6 +928,31 @@ fun GatewayApp() {
                     confirmButton = { TextButton(onClick = { statusResult = null }) { Text("OK") } },
                     title = { Text("Status upload") },
                     text = { Text(msg, style = MaterialTheme.typography.bodyMedium) }
+                )
+            }
+            if (showSetName && openChat != null) {
+                val jidForName = openChat!!
+                var nameInput by remember(jidForName) { mutableStateOf(SetName.get(jidForName) ?: "") }
+                AlertDialog(
+                    onDismissRequest = { showSetName = false },
+                    title = { Text("Set name") },
+                    text = {
+                        Column {
+                            Text("Shows only in AyX (chats, status, groups). Real WhatsApp contact name stays unchanged.",
+                                style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                            Spacer(Modifier.height(12.dp))
+                            OutlinedTextField(nameInput, { nameInput = it }, singleLine = true,
+                                placeholder = { Text("Custom name") }, shape = RoundedCornerShape(14.dp),
+                                modifier = Modifier.fillMaxWidth())
+                        }
+                    },
+                    confirmButton = { TextButton(onClick = { SetName.set(jidForName, nameInput); showSetName = false; notify("name saved") }, enabled = nameInput.isNotBlank()) { Text("Save") } },
+                    dismissButton = {
+                        Row {
+                            if (SetName.get(jidForName) != null) TextButton(onClick = { SetName.clear(jidForName); showSetName = false; notify("name removed") }) { Text("Remove", color = Color(0xFFFF3B30)) }
+                            TextButton(onClick = { showSetName = false }) { Text("Cancel") }
+                        }
+                    }
                 )
             }
         }
@@ -1133,7 +1180,7 @@ private fun MessageBubble(m: GatewayClient.Msg, previewCache: MutableMap<String,
                     }
                 }
                 if (!m.fromMe && m.chat.endsWith("@g.us") && !m.name.isNullOrBlank()) {
-                    Text(m.name, style = MaterialTheme.typography.labelMedium, color = IOS_BLUE,
+                    Text(SetName.get(m.sender ?: "") ?: m.name, style = MaterialTheme.typography.labelMedium, color = IOS_BLUE,
                         modifier = Modifier.padding(horizontal = 8.dp))
                 }
                 if (hasMedia && preview != null) {
@@ -1615,17 +1662,30 @@ private fun StatusViewer(statuses: List<GatewayClient.StatusItem>, startSender: 
     val myMine = items.first().mine
 
     var bmp by remember(st.mediaName, si, ii) { mutableStateOf<ImageBitmap?>(null) }
+    var imgLoading by remember(st.mediaName, si, ii) { mutableStateOf(st.mediaName != null && st.mediaType != "video") }
     LaunchedEffect(st.mediaName, si, ii) {
-        bmp = null
         val name = st.mediaName
         if (name != null && st.mediaType != "video") {
-            val bytes = GatewayClient.mediaBytes(name)
-            bmp = bytes?.let { BitmapFactory.decodeByteArray(it, 0, it.size)?.asImageBitmap() } ?: decodeThumb(st.thumb)
-        }
+            // show thumbnail instantly so the viewer is never blank/"…"
+            bmp = decodeThumb(st.thumb)
+            imgLoading = true
+            // full media may still be downloading on the gateway — retry a few times
+            var full: ImageBitmap? = null
+            var tries = 0
+            while (full == null && tries < 5) {
+                val bytes = GatewayClient.mediaBytes(name)
+                full = bytes?.let { runCatching { BitmapFactory.decodeByteArray(it, 0, it.size)?.asImageBitmap() }.getOrNull() }
+                if (full == null) delay(700)
+                tries++
+            }
+            if (full != null) bmp = full
+            imgLoading = false
+        } else { bmp = null; imgLoading = false }
     }
-    LaunchedEffect(si, ii, replyText.isBlank()) {
+    LaunchedEffect(si, ii, replyText.isBlank(), imgLoading) {
         if (replyText.isNotBlank()) return@LaunchedEffect
         if (st.mediaType == "video") return@LaunchedEffect
+        if (imgLoading && bmp == null) return@LaunchedEffect   // wait for media before counting down
         progress = 0f
         val dur = 5000L; val step = 40L; var elapsed = 0L
         while (elapsed < dur) {
@@ -1642,10 +1702,18 @@ private fun StatusViewer(statuses: List<GatewayClient.StatusItem>, startSender: 
             }) {
                 if (st.mediaType == "video" && st.mediaName != null) {
                     key(si, ii, st.mediaName) {
-                        AndroidView(factory = { c -> VideoView(c).apply { setVideoURI(Uri.parse(GatewayClient.mediaUrl(st.mediaName!!))); setOnPreparedListener { it.start() }; setOnCompletionListener { goNext() } } }, modifier = Modifier.fillMaxSize())
+                        AndroidView(factory = { c -> VideoView(c).apply {
+                            setVideoURI(Uri.parse(GatewayClient.mediaUrl(st.mediaName!!)))
+                            setOnPreparedListener { it.start() }
+                            setOnCompletionListener { goNext() }
+                            setOnErrorListener { _, _, _ -> goNext(); true }   // failed video -> skip instead of black screen
+                        } }, modifier = Modifier.fillMaxSize())
                     }
                 } else if (bmp != null) {
                     Image(bmp!!, null, Modifier.fillMaxSize(), contentScale = ContentScale.Fit)
+                    if (imgLoading) CircularProgressIndicator(Modifier.align(Alignment.Center), color = Color.White.copy(alpha = 0.7f))
+                } else if (imgLoading) {
+                    Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) { CircularProgressIndicator(color = Color.White) }
                 } else {
                     Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) { Text(st.text.ifBlank { "…" }, color = Color.White, modifier = Modifier.padding(24.dp)) }
                 }

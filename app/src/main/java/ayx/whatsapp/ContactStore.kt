@@ -33,6 +33,7 @@ object ContactStore {
 
     /** Look up a name for a chat jid: exact jid, then by number, then by last-10 digits. */
     fun nameFor(jid: String): String? {
+        SetName.get(jid)?.let { return it }   // user-set alias always wins
         map[jid]?.let { if (it.isNotBlank()) return it }
         val num = jid.substringBefore("@").substringBefore(":").filter { it.isDigit() }
         if (num.isBlank()) return null
